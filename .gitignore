@@ -1,0 +1,18 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+
+# Config with secrets
+appsettings.Development.json
+
+# Output
+output/
+
+# Logs
+logs/
+
+# IDE
+.vscode/
+.idea/

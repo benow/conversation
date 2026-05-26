@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/benow-conversation/benow-conversation.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/benow-conversation.Tests/benow-conversation.Tests.csproj" />
+  </Folder>
+</Solution>
