@@ -1,0 +1,47 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Daemon (OpenAI-compatible proxy)",
+      "type": "coreclr",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/benow-conversation/bin/Debug/net10.0/benow-conversation.dll",
+      "args": ["--daemon"],
+      "cwd": "${workspaceFolder}/src/benow-conversation",
+      "env": {
+        "DOTNET_ENVIRONMENT": "Development"
+      },
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "preLaunchTask": "build"
+    },
+    {
+      "name": "STT + Daemon (earbud trigger + proxy)",
+      "type": "coreclr",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/benow-conversation/bin/Debug/net10.0/benow-conversation.dll",
+      "args": ["--stt", "--daemon"],
+      "cwd": "${workspaceFolder}/src/benow-conversation",
+      "env": {
+        "DOTNET_ENVIRONMENT": "Development"
+      },
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "preLaunchTask": "build"
+    },
+    {
+      "name": "STT Only (earbud trigger, no proxy)",
+      "type": "coreclr",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/benow-conversation/bin/Debug/net10.0/benow-conversation.dll",
+      "args": ["--stt"],
+      "cwd": "${workspaceFolder}/src/benow-conversation",
+      "env": {
+        "DOTNET_ENVIRONMENT": "Development"
+      },
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "preLaunchTask": "build"
+    }
+  ]
+}

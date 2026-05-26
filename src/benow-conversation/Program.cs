@@ -2,6 +2,8 @@
 using benow_conversation.Configuration;
 using benow_conversation.Models;
 using benow_conversation.Services;
+using benow_conversation.Services.Abstractions;
+using benow_conversation.Services.Stt;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -53,6 +55,9 @@ var host = Host.CreateDefaultBuilder()
         services.AddSingleton<IAudioPlayer, AudioPlayer>();
         services.AddSingleton<ISpeechQueue, SpeechQueue>();
         services.AddSingleton<IProxyService, ProxyService>();
+
+        RegisterSttServices(services, context.Configuration);
+
         services.AddHttpClient("OpenRouter", client =>
         {
             client.Timeout = TimeSpan.FromSeconds(60);
@@ -60,6 +65,10 @@ var host = Host.CreateDefaultBuilder()
         services.AddHttpClient("ProxyBackend", client =>
         {
             client.Timeout = TimeSpan.FromMinutes(5);
+        });
+        services.AddHttpClient("Groq", client =>
+        {
+            client.Timeout = TimeSpan.FromMinutes(2);
         });
     })
     .Build();
@@ -95,6 +104,9 @@ var listDevices = false;
 var listOutputProfiles = false;
 var daemonMode = false;
 var noPlay = false;
+var sttMode = false;
+var noCleanup = false;
+string? cleanupModelOverride = null;
 
 for (var i = 0; i < cliArgs.Length; i++)
 {
@@ -196,6 +208,12 @@ for (var i = 0; i < cliArgs.Length; i++)
         noPlay = true;
     else if (cliArgs[i] == "--daemon")
         daemonMode = true;
+    else if (cliArgs[i] == "--stt")
+        sttMode = true;
+    else if (cliArgs[i] == "--no-cleanup")
+        noCleanup = true;
+    else if (cliArgs[i] == "--cleanup-model" && i + 1 < cliArgs.Length)
+        cleanupModelOverride = cliArgs[++i];
     else if (!cliArgs[i].StartsWith("-"))
     {
         var resolvedPath = Path.GetFullPath(cliArgs[i], projectRoot);
@@ -220,6 +238,65 @@ for (var i = 0; i < cliArgs.Length; i++)
 
 try
 {
+    if (noCleanup)
+    {
+        var liveSettings = host.Services.GetRequiredService<IOptions<AppSettings>>();
+        liveSettings.Value.Stt.CleanupSkip = true;
+    }
+
+    if (cleanupModelOverride != null)
+    {
+        var liveSettings = host.Services.GetRequiredService<IOptions<AppSettings>>();
+        liveSettings.Value.TranscriptCleanup.Model = cleanupModelOverride;
+        Log.Information("Cleanup model override: {Model}", cleanupModelOverride);
+    }
+
+    if (sttMode && daemonMode)
+    {
+        var proxyService = host.Services.GetRequiredService<IProxyService>();
+        var speechQueue = host.Services.GetRequiredService<ISpeechQueue>();
+        var sttRunner = host.Services.GetRequiredService<ISttRunner>();
+
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true;
+            cts.Cancel();
+        };
+
+        Log.Information("Starting STT + daemon mode...");
+        await speechQueue.StartAsync(cts.Token);
+
+        var proxyTask = proxyService.RunAsync(cts.Token);
+        var sttTask = sttRunner.RunAsync(cts.Token);
+
+        await Task.WhenAny(proxyTask, sttTask);
+        cts.Cancel();
+
+        try { await Task.WhenAll(proxyTask, sttTask); } catch { }
+
+        await speechQueue.StopAsync(CancellationToken.None);
+        Log.Information("STT + daemon stopped");
+        await Log.CloseAndFlushAsync();
+        return;
+    }
+
+    if (sttMode)
+    {
+        var sttRunner = host.Services.GetRequiredService<ISttRunner>();
+
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true;
+            cts.Cancel();
+        };
+
+        await sttRunner.RunAsync(cts.Token);
+        await Log.CloseAndFlushAsync();
+        return;
+    }
+
     if (daemonMode)
     {
         var proxyService = host.Services.GetRequiredService<IProxyService>();
@@ -779,6 +856,79 @@ static string FindProjectRoot()
     throw new InvalidOperationException("Cannot find project root directory containing a .csproj file.");
 }
 
+static void RegisterSttServices(IServiceCollection services, IConfiguration configuration)
+{
+    var sttSection = configuration.GetSection("Stt");
+    var recorder = sttSection.GetSection("Recorder").Value ?? "pipewire";
+    var transcriber = sttSection.GetSection("Transcriber").Value ?? "groq-whisper";
+    var clipboard = sttSection.GetSection("Clipboard").Value ?? "wayland";
+    var keyboard = sttSection.GetSection("Keyboard").Value ?? "ydotool";
+    var transformer = sttSection.GetSection("Transformer").Value ?? "llm";
+    var trigger = sttSection.GetSection("Trigger").Value ?? "console";
+
+    Log.Information("[STT] Loading plugins — recorder={Recorder}, transcriber={Transcriber}, transformer={Transformer}, clipboard={Clipboard}, keyboard={Keyboard}, trigger={Trigger}",
+        recorder, transcriber, transformer, clipboard, keyboard, trigger);
+
+    switch (recorder)
+    {
+        case "pipewire":
+            services.AddSingleton<IAudioRecorder, PipeWireRecorder>();
+            break;
+        default:
+            throw new InvalidOperationException($"Unknown IAudioRecorder implementation: '{recorder}'");
+    }
+
+    switch (transcriber)
+    {
+        case "groq-whisper":
+            services.AddSingleton<ITranscriptionService, GroqWhisperTranscriber>();
+            break;
+        default:
+            throw new InvalidOperationException($"Unknown ITranscriptionService implementation: '{transcriber}'");
+    }
+
+    switch (transformer)
+    {
+        case "llm":
+            services.AddSingleton<ITextTransformer, LlmTextTransformer>();
+            break;
+        default:
+            throw new InvalidOperationException($"Unknown ITextTransformer implementation: '{transformer}'");
+    }
+
+    switch (clipboard)
+    {
+        case "wayland":
+            services.AddSingleton<IClipboardService, WaylandClipboardService>();
+            break;
+        default:
+            throw new InvalidOperationException($"Unknown IClipboardService implementation: '{clipboard}'");
+    }
+
+    switch (keyboard)
+    {
+        case "ydotool":
+            services.AddSingleton<IKeyboardSimulator, YdotoolKeyboardSimulator>();
+            break;
+        default:
+            throw new InvalidOperationException($"Unknown IKeyboardSimulator implementation: '{keyboard}'");
+    }
+
+    switch (trigger)
+    {
+        case "console":
+            services.AddSingleton<IRecordingTrigger, ConsoleRecordingTrigger>();
+            break;
+        case "evdev-media":
+            services.AddSingleton<IRecordingTrigger, EvdevMediaKeyTrigger>();
+            break;
+        default:
+            throw new InvalidOperationException($"Unknown IRecordingTrigger implementation: '{trigger}'");
+    }
+
+    services.AddSingleton<ISttRunner, SttRunner>();
+}
+
 static void PrintUsage(IServiceProvider services)
 {
     var settings = services.GetRequiredService<IOptions<AppSettings>>().Value;
@@ -813,5 +963,9 @@ static void PrintUsage(IServiceProvider services)
     Log.Information("  --save-persona <name>           Save current params as a named persona");
     Log.Information("  --set-default                   Mark persona as default (use with --save-persona or --persona)");
     Log.Information("  --daemon                        Run as OpenAI-compatible proxy (TTS on responses)");
+    Log.Information("  --stt                           Start STT mode (record → transcribe → paste)");
+    Log.Information("  --stt --daemon                  STT + daemon mode (both run concurrently)");
+    Log.Information("  --no-cleanup                    Skip transcript cleanup step");
+    Log.Information("  --cleanup-model <model>         Override cleanup LLM model");
     Log.Information("  --help                          Show this help message");
 }
