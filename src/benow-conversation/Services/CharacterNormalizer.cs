@@ -123,6 +123,8 @@ Output ONLY the formatted script. No preamble, no explanation. Every line MUST s
 
         var modelId = _settings.MultiCharacter.NormalizerModel;
         if (string.IsNullOrEmpty(modelId))
+            modelId = _settings.Proxy.BackendModel;
+        if (string.IsNullOrEmpty(modelId))
         {
             _logger.LogWarning("No normalizer model configured");
             return text;
