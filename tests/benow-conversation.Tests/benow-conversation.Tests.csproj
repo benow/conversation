@@ -25,4 +25,10 @@
     <ProjectReference Include="..\..\src\benow-conversation\benow-conversation.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="fixtures\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

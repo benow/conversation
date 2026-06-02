@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using benow_conversation.Configuration;
+using benow_conversation.Models;
 using benow_conversation.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -53,7 +54,14 @@ public class TtsServiceTests : IDisposable
         converter.Setup(c => c.ConvertPcmToMp3Async(It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<int>()))
             .ReturnsAsync((byte[] pcm, int _, int _) => Encoding.UTF8.GetBytes("converted-mp3:" + pcm.Length));
 
-        var service = new TtsService(factory.Object, options, logger.Object, converter.Object);
+        var formatCache = new Mock<ProviderFormatCache>(
+            Mock.Of<IOptionsMonitor<AppSettings>>(), Mock.Of<ILogger<ProviderFormatCache>>());
+        var cacheStore = new Dictionary<string, AudioFormat>();
+        formatCache.Setup(c => c.Get(It.IsAny<string>())).Returns<string>(key => cacheStore.TryGetValue(key, out var f) ? f : null);
+        formatCache.Setup(c => c.Set(It.IsAny<string>(), It.IsAny<AudioFormat>())).Callback<string, AudioFormat>((k, v) => cacheStore[k] = v);
+        formatCache.Setup(c => c.EnsureLoaded());
+
+        var service = new TtsService(factory.Object, options, logger.Object, converter.Object, formatCache.Object);
 
         return (service, handler, converter);
     }
@@ -94,7 +102,14 @@ public class TtsServiceTests : IDisposable
         converter.Setup(c => c.ConvertPcmToMp3Async(It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<int>()))
             .ReturnsAsync((byte[] pcm, int _, int _) => Encoding.UTF8.GetBytes("converted-mp3:" + pcm.Length));
 
-        var service = new TtsService(factory.Object, options, logger.Object, converter.Object);
+        var formatCache = new Mock<ProviderFormatCache>(
+            Mock.Of<IOptionsMonitor<AppSettings>>(), Mock.Of<ILogger<ProviderFormatCache>>());
+        var cacheStore = new Dictionary<string, AudioFormat>();
+        formatCache.Setup(c => c.Get(It.IsAny<string>())).Returns<string>(key => cacheStore.TryGetValue(key, out var f) ? f : null);
+        formatCache.Setup(c => c.Set(It.IsAny<string>(), It.IsAny<AudioFormat>())).Callback<string, AudioFormat>((k, v) => cacheStore[k] = v);
+        formatCache.Setup(c => c.EnsureLoaded());
+
+        var service = new TtsService(factory.Object, options, logger.Object, converter.Object, formatCache.Object);
 
         return (service, handler, converter);
     }
@@ -237,7 +252,14 @@ public class TtsServiceTests : IDisposable
         converter.Setup(c => c.ConvertPcmToMp3Async(It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<int>()))
             .ThrowsAsync(new InvalidOperationException("ffmpeg is not available"));
 
-        var svc = new TtsService(factory.Object, options, logger.Object, converter.Object);
+        var formatCache = new Mock<ProviderFormatCache>(
+            Mock.Of<IOptionsMonitor<AppSettings>>(), Mock.Of<ILogger<ProviderFormatCache>>());
+        var cacheStore = new Dictionary<string, AudioFormat>();
+        formatCache.Setup(c => c.Get(It.IsAny<string>())).Returns<string>(key => cacheStore.TryGetValue(key, out var f) ? f : null);
+        formatCache.Setup(c => c.Set(It.IsAny<string>(), It.IsAny<AudioFormat>())).Callback<string, AudioFormat>((k, v) => cacheStore[k] = v);
+        formatCache.Setup(c => c.EnsureLoaded());
+
+        var svc = new TtsService(factory.Object, options, logger.Object, converter.Object, formatCache.Object);
 
         var formatErrorBody = "{\"error\":{\"message\":\"response_format not supported. Got \\\"mp3\\\".\"}}";
         handler.SetSequence(

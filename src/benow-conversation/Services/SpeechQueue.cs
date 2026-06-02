@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading.Channels;
 using benow_conversation.Configuration;
 using Microsoft.Extensions.Logging;
@@ -7,7 +8,9 @@ namespace benow_conversation.Services;
 
 public interface ISpeechQueue
 {
-    void Enqueue(string text);
+    void Enqueue(string text, bool cancelCurrent = true);
+    void FlushAndCancel();
+    void Flush();
     Task StartAsync(CancellationToken cancellationToken);
     Task StopAsync(CancellationToken cancellationToken);
 }
@@ -20,11 +23,16 @@ public class SpeechQueue : ISpeechQueue
     });
 
     private readonly ITtsService _ttsService;
+    private readonly ITtsProvider _ttsProvider;
     private readonly IAudioPlayer _audioPlayer;
+    private readonly IPersistentAudioPipeline? _pipeline;
+    private readonly AudioFormatConverter _converter;
     private readonly AppSettings _settings;
     private readonly ILogger<SpeechQueue> _logger;
     private readonly string _ttsModel;
     private readonly string _ttsVoice;
+    private readonly string _ttsPersona;
+    private readonly string _ttsBackend;
     private readonly string? _ttsInstructions;
     private readonly double? _ttsTemperature;
     private readonly int? _ttsSeed;
@@ -33,14 +41,21 @@ public class SpeechQueue : ISpeechQueue
 
     public SpeechQueue(
         ITtsService ttsService,
+        ITtsProvider ttsProvider,
         IAudioPlayer audioPlayer,
+        IPersistentAudioPipeline? pipeline,
+        AudioFormatConverter converter,
         IOptions<AppSettings> settings,
         ILogger<SpeechQueue> logger)
     {
         _ttsService = ttsService;
+        _ttsProvider = ttsProvider;
         _audioPlayer = audioPlayer;
+        _pipeline = pipeline;
+        _converter = converter;
         _settings = settings.Value;
         _logger = logger;
+        _ttsBackend = _settings.TtsBackend;
 
         var proxy = _settings.Proxy;
         VoicePersona? persona = null;
@@ -49,7 +64,12 @@ public class SpeechQueue : ISpeechQueue
             _settings.Personas.TryGetValue(proxy.TtsPersona, out var p))
         {
             persona = p;
-            _logger.LogInformation("SpeechQueue using persona: {Persona}", proxy.TtsPersona);
+            _ttsPersona = proxy.TtsPersona;
+            _logger.LogInformation("SpeechQueue using persona: {Persona} (backend={Backend})", proxy.TtsPersona, _ttsBackend);
+        }
+        else
+        {
+            _ttsPersona = "";
         }
 
         _ttsModel = persona?.Model ?? (string.IsNullOrEmpty(proxy.TtsModel) ? _settings.OpenRouter.TtsModel : proxy.TtsModel);
@@ -59,12 +79,34 @@ public class SpeechQueue : ISpeechQueue
         _ttsSeed = persona?.Seed;
     }
 
-    public void Enqueue(string text)
+    public void Enqueue(string text, bool cancelCurrent = true)
     {
         if (string.IsNullOrWhiteSpace(text)) return;
-        _logger.LogInformation("Enqueueing speech ({Length} chars): {Preview}...",
-            text.Length, text.Length > 80 ? text[..80] : text);
+        _logger.LogInformation("Enqueueing speech ({Length} chars, cancel={Cancel}): {Preview}...",
+            text.Length, cancelCurrent, text.Length > 80 ? text[..80] : text);
+        if (cancelCurrent)
+        {
+            try { _currentPlaybackCts?.Cancel(); } catch (ObjectDisposedException) { }
+        }
         _channel.Writer.TryWrite(text);
+    }
+
+    public void FlushAndCancel()
+    {
+        _logger.LogInformation("Flushing speech queue and cancelling current playback");
+        while (_channel.Reader.TryRead(out _)) { }
+        try { _currentPlaybackCts?.Cancel(); } catch (ObjectDisposedException) { }
+        if (_pipeline != null)
+        {
+            try { _pipeline.InterruptAsync().GetAwaiter().GetResult(); } catch { }
+        }
+    }
+
+    public void Flush()
+    {
+        _logger.LogInformation("Flushing speech queue (pipeline kept alive)");
+        while (_channel.Reader.TryRead(out _)) { }
+        try { _currentPlaybackCts?.Cancel(); } catch (ObjectDisposedException) { }
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -84,12 +126,6 @@ public class SpeechQueue : ISpeechQueue
     {
         await foreach (var text in _channel.Reader.ReadAllAsync(cancellationToken))
         {
-            try
-            {
-                _currentPlaybackCts?.Cancel();
-            }
-            catch (ObjectDisposedException) { }
-
             var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _currentPlaybackCts = cts;
 
@@ -98,14 +134,67 @@ public class SpeechQueue : ISpeechQueue
                 _logger.LogInformation("Speaking ({Length} chars): {Preview}...",
                     text.Length, text.Length > 60 ? text[..60] : text);
 
-                var (audioStream, format) = await _ttsService.SynthesizeToStreamAsync(
-                    text, _ttsVoice, _ttsInstructions, _ttsTemperature, _ttsSeed, _ttsModel);
+                var sw = Stopwatch.StartNew();
 
-                using var ms = new MemoryStream();
-                await audioStream.CopyToAsync(ms, cts.Token);
-                ms.Position = 0;
+                if (_ttsBackend != "openrouter")
+                {
+                    var audioStream = await _ttsProvider.SynthesizeAsync(
+                        text, _ttsPersona, _ttsVoice, _ttsInstructions, _ttsTemperature, _ttsSeed, cts.Token);
+                    await using var _ = audioStream;
+                    _logger.LogInformation("TTS ({Backend}) received in {Ms}ms", _ttsBackend, sw.ElapsedMilliseconds);
 
-                await _audioPlayer.PlayStreamAsync(ms, format, cancellationToken: cts.Token);
+                    using var ms = new MemoryStream();
+                    await audioStream.CopyToAsync(ms, cts.Token);
+                    var audioBytes = ms.ToArray();
+
+                    audioBytes = await _converter.ConvertAsync(audioBytes, _ttsProvider.OutputFormat, cts.Token);
+
+                    if (_pipeline != null)
+                    {
+                        using var pcmMs = new MemoryStream(audioBytes);
+                        await _pipeline.PipeAsync(pcmMs, cts.Token);
+                    }
+                    else
+                    {
+                        using var pcmMs = new MemoryStream(audioBytes);
+                        await _audioPlayer.PlayStreamAsync(pcmMs, "pcm", cancellationToken: cts.Token);
+                    }
+
+                    _logger.LogInformation("Audio completed in {Ms}ms total", sw.ElapsedMilliseconds);
+                }
+                else if (_pipeline != null && _settings.Proxy.StreamTtsAudio)
+                {
+                    var audioStream = await _ttsService.SynthesizeLiveStreamAsync(
+                        text, _ttsVoice, _ttsInstructions, _ttsTemperature, _ttsSeed, _ttsModel);
+                    await using var _ = audioStream;
+                    _logger.LogInformation("TTS stream received in {Ms}ms, piping to ffplay", sw.ElapsedMilliseconds);
+
+                    using var ms = new MemoryStream();
+                    await audioStream.CopyToAsync(ms, cts.Token);
+                    var audioBytes = ms.ToArray();
+
+                    audioBytes = await _converter.ConvertAsync(audioBytes, _ttsProvider.OutputFormat, cts.Token);
+
+                    using var pcmMs = new MemoryStream(audioBytes);
+                    await _pipeline.PipeAsync(pcmMs, cts.Token);
+                    _logger.LogInformation("Audio piped to ffplay in {Ms}ms total", sw.ElapsedMilliseconds);
+                }
+                else
+                {
+                    var (audioStream, format) = await _ttsService.SynthesizeToStreamAsync(
+                        text, _ttsVoice, _ttsInstructions, _ttsTemperature, _ttsSeed, _ttsModel);
+                    _logger.LogInformation("TTS buffered in {Ms}ms", sw.ElapsedMilliseconds);
+
+                    using var ms = new MemoryStream();
+                    await audioStream.CopyToAsync(ms, cts.Token);
+                    var audioBytes = ms.ToArray();
+
+                    audioBytes = await _converter.ConvertAsync(audioBytes, _ttsProvider.OutputFormat, cts.Token);
+
+                    using var pcmMs = new MemoryStream(audioBytes);
+                    await _audioPlayer.PlayStreamAsync(pcmMs, "pcm", cancellationToken: cts.Token);
+                    _logger.LogInformation("Audio played in {Ms}ms total", sw.ElapsedMilliseconds);
+                }
             }
             catch (OperationCanceledException) when (cts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
             {

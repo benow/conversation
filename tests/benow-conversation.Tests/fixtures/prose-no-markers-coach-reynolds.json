@@ -1,0 +1,19 @@
+{
+  "name": "prose-no-markers-coach-reynolds",
+  "description": "Prose-style multi-character with no bracket markers at all — should parse as single segment with empty character name (modifier injector may or may not add markers, parser must handle gracefully)",
+  "source": "production log 2026-05-30 ~11:50, LLM generated prose without [Name:F] format",
+  "input": "Coach Reynolds: F Ms. Thompson, this is Coach Reynolds. I've got the team gearing up for their practice session. Shall I have them meet with Andy during the team meeting as planned?\n\nMs. Thompson smiles and responds, \"Yes, Coach. That would be perfect. Andy is eager to speak with the team and provide some guidance on body image and self-acceptance. I'll make sure to clear it with the team captains.\"\n\nThe sound of laughter and chatter can be heard from the pool area, where the girls are starting to arrive for their practice session. The air is filled with the scent of chlorine and the sound of splashing water, creating a vibrant and energetic atmosphere.",
+  "expectedCoverage": {
+    "minPercent": 80,
+    "note": "Prose without markers will parse as one big segment — no text should be consumed by modifier extraction"
+  },
+  "expectedSegments": [
+    {
+      "characterName": "",
+      "gender": "F",
+      "isNarration": false,
+      "isThought": false,
+      "spokenTextContains": "Coach Reynolds"
+    }
+  ]
+}

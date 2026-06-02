@@ -55,12 +55,12 @@ public class WaylandClipboardService : IClipboardService
         if (!IsAvailable)
             throw new InvalidOperationException("wl-copy is not available.");
 
-        _logger.LogDebug("[Clipboard] Copying {Length} chars to clipboard via wl-copy --foreground", text.Length);
+        _logger.LogDebug("[Clipboard] Copying {Length} chars to clipboard via wl-copy", text.Length);
 
         var psi = new ProcessStartInfo
         {
             FileName = "wl-copy",
-            Arguments = "--foreground",
+            Arguments = "",
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,

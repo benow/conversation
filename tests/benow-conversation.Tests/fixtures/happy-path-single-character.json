@@ -1,0 +1,14 @@
+{
+  "name": "happy-path-single-character",
+  "description": "Single character with multiple lines, narration, and thought. Validates the parser handles single-character scripts correctly.",
+  "source": "synthetic",
+  "input": "[Alice:F] *looks around the room* I'm the only one here.[thought]This is peaceful.[/thought] *smiles* I like the quiet.",
+  "expectedCoverage": { "minPercent": 65 },
+  "expectedSegments": [
+    { "characterName": "Alice", "gender": "F", "isNarration": true, "isThought": false, "spokenTextContains": "looks around the room" },
+    { "characterName": "Alice", "gender": "F", "isNarration": false, "isThought": false, "spokenTextContains": "the only one here" },
+    { "characterName": "Alice", "gender": "F", "isNarration": false, "isThought": true, "spokenTextContains": "This is peaceful" },
+    { "characterName": "Alice", "gender": "F", "isNarration": true, "isThought": false, "spokenTextContains": "smiles" },
+    { "characterName": "Alice", "gender": "F", "isNarration": false, "isThought": false, "spokenTextContains": "I like the quiet" }
+  ]
+}

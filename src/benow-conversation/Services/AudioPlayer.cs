@@ -92,14 +92,17 @@ public class AudioPlayer : IAudioPlayer
         var ffplayPath = _cachedFfplayPath ?? FindFfplay() ?? "ffplay";
         var args = BuildStreamArgs(format, volume, device);
 
-        _logger.LogInformation("Streaming audio to ffplay (format={Format})", format);
+        var audioSize = audioStream.CanSeek ? audioStream.Length : -1;
+        _logger.LogInformation("Streaming audio to ffplay (format={Format}, size={Size} bytes)", format, audioSize);
+
+        if (audioSize >= 0 && audioSize < 1024)
+            _logger.LogWarning("Audio data is very small ({Size} bytes) — may be truncated or incomplete", audioSize);
 
         var psi = new ProcessStartInfo
         {
             FileName = ffplayPath,
             Arguments = args,
             RedirectStandardInput = true,
-            RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true
@@ -108,6 +111,7 @@ public class AudioPlayer : IAudioPlayer
         using var process = new Process { StartInfo = psi };
         process.Start();
 
+        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
         var copyTask = CopyStreamToProcessAsync(audioStream, process.StandardInput.BaseStream, cancellationToken);
 
         try
@@ -121,12 +125,14 @@ public class AudioPlayer : IAudioPlayer
         }
 
         await copyTask;
+        var stderr = await stderrTask;
 
         if (process.ExitCode != 0)
-        {
-            var error = await process.StandardError.ReadToEndAsync(cancellationToken);
-            _logger.LogWarning("ffplay exited with code {ExitCode}: {Error}", process.ExitCode, error.Trim());
-        }
+            _logger.LogWarning("ffplay exited with code {ExitCode}: {Error}", process.ExitCode, stderr.Trim());
+        else if (!string.IsNullOrWhiteSpace(stderr))
+            _logger.LogDebug("ffplay stderr: {Error}", stderr.Trim());
+
+        _logger.LogInformation("ffplay finished (exit={ExitCode})", process.ExitCode);
     }
 
     public IReadOnlyList<AudioDevice> ListDevices()
@@ -189,7 +195,7 @@ public class AudioPlayer : IAudioPlayer
         var args = "-nodisp -autoexit -loglevel quiet";
 
         if (format.Equals("pcm", StringComparison.OrdinalIgnoreCase))
-            args += " -f s16le -ar 24000";
+            args += " -f s16le -ar 24000 -ac 1";
         else if (format.Equals("wav", StringComparison.OrdinalIgnoreCase))
             args += " -f wav";
         else if (format.Equals("mp3", StringComparison.OrdinalIgnoreCase))
@@ -224,7 +230,6 @@ public class AudioPlayer : IAudioPlayer
         {
             FileName = ffplayPath,
             Arguments = args,
-            RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true
@@ -234,6 +239,8 @@ public class AudioPlayer : IAudioPlayer
 
         using var process = new Process { StartInfo = psi };
         process.Start();
+
+        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
 
         try
         {
@@ -245,11 +252,10 @@ public class AudioPlayer : IAudioPlayer
             throw;
         }
 
+        var stderr = await stderrTask;
+
         if (process.ExitCode != 0)
-        {
-            var error = await process.StandardError.ReadToEndAsync();
-            _logger.LogWarning("ffplay exited with code {ExitCode}: {Error}", process.ExitCode, error.Trim());
-        }
+            _logger.LogWarning("ffplay exited with code {ExitCode}: {Error}", process.ExitCode, stderr.Trim());
     }
 
     private static string? FindFfplay()

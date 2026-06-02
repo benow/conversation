@@ -1,0 +1,50 @@
+FROM rocm/dev-ubuntu-22.04:latest
+
+ARG VENV_NAME="cosyvoice"
+ENV VENV=$VENV_NAME
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+SHELL ["/bin/bash", "--login", "-c"]
+
+RUN apt-get update -y --fix-missing && \
+    apt-get install -y git curl wget ffmpeg unzip git-lfs sox libsox-dev build-essential && \
+    apt-get clean && git lfs install
+
+RUN wget --quiet https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O ~/miniforge.sh && \
+    /bin/bash ~/miniforge.sh -b -p /opt/conda && rm ~/miniforge.sh && \
+    ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
+    echo "source /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc && \
+    echo "conda activate ${VENV}" >> ~/.bashrc
+
+ENV PATH /opt/conda/bin:$PATH
+
+RUN conda config --add channels conda-forge && \
+    conda config --set channel_priority strict && \
+    conda create -y -n ${VENV} python=3.10
+
+ENV CONDA_DEFAULT_ENV=${VENV}
+ENV PATH /opt/conda/bin:/opt/conda/envs/${VENV}/bin:$PATH
+
+WORKDIR /workspace
+ENV PYTHONPATH="${PYTHONPATH}:/workspace/CosyVoice:/workspace/CosyVoice/third_party/Matcha-TTS"
+
+RUN conda activate ${VENV} && \
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2.3
+
+RUN conda activate ${VENV} && conda install -y -c conda-forge pynini==2.1.5 && \
+    pip install setuptools wheel
+
+RUN git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git
+
+RUN conda activate ${VENV} && cd CosyVoice && \
+    sed -i 's/openai-whisper==20231117/faster-whisper/' requirements.txt && \
+    pip install -r requirements.txt --no-deps 2>/dev/null; \
+    pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host=mirrors.aliyun.com --no-cache-dir || true && \
+    pip install conformer diffusers fastapi gradio grpcio grpcio-tools hydra-core \
+        HyperPyYAML inflect librosa lightning loguru modelscope onnxruntime \
+        pydub tensorboard transformers uvicorn wget wetext WeTextProcessing jieba \
+        zhconv cn2an g2p_en faster-whisper pyworld webrtcvad -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host=mirrors.aliyun.com --no-cache-dir
+
+WORKDIR /workspace/CosyVoice
+CMD ["python3", "webui.py", "--port", "50000", "--model_dir", "pretrained_models/CosyVoice2-0.5B"]

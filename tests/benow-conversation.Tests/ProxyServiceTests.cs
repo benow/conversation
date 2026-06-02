@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using benow_conversation.Configuration;
+using benow_conversation.Models;
 using benow_conversation.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -114,7 +115,7 @@ public class ProxyServiceTests
         var logger = new Mock<ILogger<SpeechQueue>>();
         var options = Options.Create(settings);
 
-        var queue = new SpeechQueue(ttsService.Object, audioPlayer.Object, options, logger.Object);
+        var queue = new SpeechQueue(ttsService.Object, CreateTtsMock().Object, audioPlayer.Object, null, CreateConverter(), options, logger.Object);
 
         await queue.StartAsync(CancellationToken.None);
         queue.Enqueue("Test speech text");
@@ -140,7 +141,7 @@ public class ProxyServiceTests
         var logger = new Mock<ILogger<SpeechQueue>>();
         var options = Options.Create(settings);
 
-        var queue = new SpeechQueue(ttsService.Object, audioPlayer.Object, options, logger.Object);
+        var queue = new SpeechQueue(ttsService.Object, CreateTtsMock().Object, audioPlayer.Object, null, CreateConverter(), options, logger.Object);
 
         Assert.NotNull(queue);
     }
@@ -166,7 +167,7 @@ public class ProxyServiceTests
         var logger = new Mock<ILogger<SpeechQueue>>();
         var options = Options.Create(settings);
 
-        return new SpeechQueue(ttsService.Object, audioPlayer.Object, options, logger.Object);
+        return new SpeechQueue(ttsService.Object, CreateTtsMock().Object, audioPlayer.Object, null, CreateConverter(), options, logger.Object);
     }
 
     private static AppSettings CreateSettings()
@@ -217,6 +218,27 @@ public class ProxyServiceTests
                 It.IsAny<Stream>(), It.IsAny<string>(), It.IsAny<double?>(),
                 It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
+        return mock;
+    }
+
+    private static AudioFormatConverter CreateConverter()
+    {
+        var opts = Options.Create(new AppSettings
+        {
+            Audio = new AudioSettings
+            {
+                PcmSampleRate = 24000,
+                PcmChannels = 1,
+                PcmBitsPerSample = 16
+            }
+        });
+        return new AudioFormatConverter(opts, Mock.Of<ILogger<AudioFormatConverter>>());
+    }
+
+    private static Mock<ITtsProvider> CreateTtsMock()
+    {
+        var mock = new Mock<ITtsProvider>();
+        mock.SetupGet(t => t.OutputFormat).Returns(AudioFormat.Pcm24000Mono);
         return mock;
     }
 }

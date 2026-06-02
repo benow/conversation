@@ -15,18 +15,18 @@ public class SttSettingsTests
         var settings = new SttSettings();
         Assert.Equal("pipewire", settings.Recorder);
         Assert.Equal("pw-record", settings.RecorderCommand);
-        Assert.Equal("wav", settings.RecorderFormat);
+        Assert.Equal("mp3", settings.RecorderFormat);
         Assert.Equal(16000, settings.RecorderSampleRate);
         Assert.Equal(1, settings.RecorderChannels);
         Assert.Equal("groq-whisper", settings.Transcriber);
         Assert.Equal("wayland", settings.Clipboard);
         Assert.Equal("ydotool", settings.Keyboard);
         Assert.Equal("llm", settings.Transformer);
-        Assert.Equal("console", settings.Trigger);
-        Assert.True(settings.AutoSubmit);
+        Assert.Equal("evdev-keyboard", settings.Trigger);
+        Assert.False(settings.AutoSubmit);
         Assert.Equal("ffmpeg", settings.FfmpegPath);
         Assert.False(settings.CleanupSkip);
-        Assert.Equal("/tmp/.ydotool_socket", settings.YdotoolSocketPath);
+        Assert.Equal("/run/user/1000/.ydotool_socket", settings.YdotoolSocketPath);
         Assert.Equal(300, settings.TriggerDebounceMs);
     }
 
@@ -45,8 +45,8 @@ public class SttSettingsTests
     {
         var settings = new TranscriptCleanupSettings();
         Assert.Equal("", settings.BaseUrl);
-        Assert.Equal("meta-llama/llama-3.1-8b-instruct", settings.Model);
-        Assert.Contains("professional editor", settings.SystemPrompt);
+        Assert.Equal("", settings.Model);
+        Assert.Contains("transcription editor", settings.SystemPrompt);
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public class SttSettingsTests
         Assert.NotNull(settings.Groq);
         Assert.NotNull(settings.TranscriptCleanup);
         Assert.Equal("pipewire", settings.Stt.Recorder);
-        Assert.Equal("console", settings.Stt.Trigger);
+        Assert.Equal("evdev-keyboard", settings.Stt.Trigger);
     }
 }
 
@@ -241,7 +241,7 @@ public class SttRunnerTests
         var runner = new SttRunner(
             recorder.Object, transcriber.Object, transformer.Object,
             clipboard.Object, keyboard.Object, trigger.Object,
-            httpClientFactory.Object, Options.Create(settings), logger.Object);
+            Options.Create(settings), logger.Object);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         await runner.RunAsync(cts.Token);
@@ -293,7 +293,7 @@ public class SttRunnerTests
         var runner = new SttRunner(
             recorder.Object, Mock.Of<ITranscriptionService>(), Mock.Of<ITextTransformer>(),
             Mock.Of<IClipboardService>(), Mock.Of<IKeyboardSimulator>(), trigger.Object,
-            httpClientFactory.Object, Options.Create(settings), logger.Object);
+            Options.Create(settings), logger.Object);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         await runner.RunAsync(cts.Token);
@@ -317,7 +317,7 @@ public class SttRunnerTests
         var runner = new SttRunner(
             recorder.Object, Mock.Of<ITranscriptionService>(), Mock.Of<ITextTransformer>(),
             Mock.Of<IClipboardService>(), Mock.Of<IKeyboardSimulator>(), trigger.Object,
-            httpClientFactory.Object, Options.Create(settings), logger.Object);
+            Options.Create(settings), logger.Object);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         await runner.RunAsync(cts.Token);
@@ -378,5 +378,41 @@ public class EvdevDebounceTests
         var elapsed = TimeSpan.FromTicks(now - lastTicks).TotalMilliseconds;
 
         Assert.True(elapsed >= debounceMs);
+    }
+}
+
+public class KeyParseTests
+{
+    [Fact]
+    public void ParseKeySpec_Ctrl_Space()
+    {
+        var (mods, key) = EvdevKeyboardTrigger.ParseKeySpec("Ctrl+Space");
+        Assert.Contains((ushort)29, mods);
+        Assert.Equal((ushort)57, key);
+    }
+
+    [Fact]
+    public void ParseKeySpec_F9()
+    {
+        var (mods, key) = EvdevKeyboardTrigger.ParseKeySpec("F9");
+        Assert.Contains((ushort)29, mods);
+        Assert.Equal((ushort)67, key);
+    }
+
+    [Fact]
+    public void ParseKeySpec_Ctrl_Alt_Space()
+    {
+        var (mods, key) = EvdevKeyboardTrigger.ParseKeySpec("Ctrl+Alt+Space");
+        Assert.Contains((ushort)29, mods);
+        Assert.Contains((ushort)56, mods);
+        Assert.Equal((ushort)57, key);
+    }
+
+    [Fact]
+    public void ParseKeySpec_Empty_DefaultsToCtrlSpace()
+    {
+        var (mods, key) = EvdevKeyboardTrigger.ParseKeySpec("");
+        Assert.Contains((ushort)29, mods);
+        Assert.Equal((ushort)57, key);
     }
 }

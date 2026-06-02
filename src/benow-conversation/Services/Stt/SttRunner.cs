@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text.Json;
 using benow_conversation.Configuration;
 using benow_conversation.Services.Abstractions;
 using Microsoft.Extensions.Logging;
@@ -15,7 +14,6 @@ public class SttRunner : ISttRunner
     private readonly IClipboardService _clipboard;
     private readonly IKeyboardSimulator _keyboard;
     private readonly IRecordingTrigger _trigger;
-    private readonly IHttpClientFactory _httpClientFactory;
     private readonly AppSettings _settings;
     private readonly ILogger<SttRunner> _logger;
 
@@ -26,7 +24,6 @@ public class SttRunner : ISttRunner
         IClipboardService clipboard,
         IKeyboardSimulator keyboard,
         IRecordingTrigger trigger,
-        IHttpClientFactory httpClientFactory,
         IOptions<AppSettings> settings,
         ILogger<SttRunner> logger)
     {
@@ -36,7 +33,6 @@ public class SttRunner : ISttRunner
         _clipboard = clipboard;
         _keyboard = keyboard;
         _trigger = trigger;
-        _httpClientFactory = httpClientFactory;
         _settings = settings.Value;
         _logger = logger;
     }
@@ -64,17 +60,6 @@ public class SttRunner : ISttRunner
             return;
         }
 
-        var proxyReady = false;
-        if (_settings.Proxy.Port > 0)
-        {
-            _logger.LogInformation("[STT] Waiting for proxy at localhost:{Port}...", _settings.Proxy.Port);
-            proxyReady = await WaitForProxyAsync(cancellationToken);
-            if (proxyReady)
-                _logger.LogInformation("[STT] Proxy is ready at localhost:{Port}", _settings.Proxy.Port);
-            else
-                _logger.LogInformation("[STT] Proxy not detected at localhost:{Port} — skipping proxy submission", _settings.Proxy.Port);
-        }
-
         _logger.LogInformation("[STT] Ready. Waiting for trigger to start recording...");
         var cycleCount = 0;
 
@@ -85,28 +70,37 @@ public class SttRunner : ISttRunner
 
             try
             {
-                Console.WriteLine("[STT] Waiting for trigger to start recording...");
+                Console.WriteLine("[STT] Waiting for trigger...");
                 await _trigger.WaitForTriggerAsync(cancellationToken);
-                _logger.LogInformation("[STT] Cycle {Cycle}: trigger received — starting recording", cycleCount);
+                _logger.LogInformation("[STT] Cycle {Cycle}: trigger received", cycleCount);
 
-                var tempFile = Path.Combine(Path.GetTempPath(), $"stt_{Guid.NewGuid():N}.wav");
+                var ext = _settings.Stt.RecorderFormat.Equals("wav", StringComparison.OrdinalIgnoreCase) ? "wav" : "mp3";
+                var tempFile = Path.Combine(Path.GetTempPath(), $"stt_{Guid.NewGuid():N}.{ext}");
                 recordedFile = tempFile;
 
-                Console.WriteLine("[STT] Recording... waiting for trigger to stop.");
+                Console.WriteLine("[STT] Recording... Ctrl+Space to stop.");
                 _logger.LogInformation("[STT] Cycle {Cycle}: recording to {File}", cycleCount, tempFile);
 
                 var sw = Stopwatch.StartNew();
+                using var recCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
-                using var recordCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                var recordTask = _recorder.RecordToFileAsync(tempFile, recordCts.Token);
+                if (_settings.Stt.FeedbackBeep)
+                {
+                    await PlayBeepAsync(880, 0.15, CancellationToken.None);
+                    await Task.Delay(80, CancellationToken.None);
+                }
+
+                var recordingTask = _recorder.RecordToFileAsync(tempFile, recCts.Token);
 
                 await _trigger.WaitForTriggerAsync(cancellationToken);
-                _logger.LogInformation("[STT] Cycle {Cycle}: stop trigger received after {Ms}ms", cycleCount, sw.ElapsedMilliseconds);
+                _logger.LogInformation("[STT] Cycle {Cycle}: stop trigger received", cycleCount);
+                recCts.Cancel();
 
-                recordCts.Cancel();
+                if (_settings.Stt.FeedbackBeep)
+                    await PlayBeepAsync(440, 0.2, cancellationToken);
 
-                recordedFile = await recordTask;
-                _logger.LogInformation("[STT] Cycle {Cycle}: recording saved to {File}", cycleCount, recordedFile);
+                recordedFile = await recordingTask;
+                _logger.LogInformation("[STT] Cycle {Cycle}: recording saved ({Ms}ms, {Size} bytes)", cycleCount, sw.ElapsedMilliseconds, new FileInfo(recordedFile).Length);
 
                 Console.WriteLine("[STT] Transcribing...");
                 _logger.LogInformation("[STT] Cycle {Cycle}: transcribing {File}...", cycleCount, recordedFile);
@@ -123,9 +117,9 @@ public class SttRunner : ISttRunner
                 _logger.LogInformation("[STT] Cycle {Cycle}: raw transcript ({Length} chars): {Text}", cycleCount, transcript.Length, transcript);
 
                 string finalText;
-                if (_settings.Stt.CleanupSkip)
+                if (_settings.Stt.CleanupSkip || string.IsNullOrWhiteSpace(_settings.TranscriptCleanup.Model))
                 {
-                    _logger.LogInformation("[STT] Cycle {Cycle}: skipping cleanup (CleanupSkip=true)", cycleCount);
+                    _logger.LogInformation("[STT] Cycle {Cycle}: skipping cleanup (CleanupSkip={Skip}, Model={Model})", cycleCount, _settings.Stt.CleanupSkip, _settings.TranscriptCleanup.Model ?? "(empty)");
                     finalText = transcript;
                 }
                 else
@@ -159,7 +153,7 @@ public class SttRunner : ISttRunner
 
                     if (_settings.Stt.AutoSubmit)
                     {
-                        _logger.LogInformation("[STT] Cycle {Cycle}: auto-submitting (pressing Enter)...", cycleCount);
+                        _logger.LogInformation("[STT] Cycle {Cycle}: pressing Enter (submits via focused app)...", cycleCount);
                         await _keyboard.PressEnterAsync(cancellationToken);
                     }
                 }
@@ -168,19 +162,7 @@ public class SttRunner : ISttRunner
                     _logger.LogWarning("[STT] Cycle {Cycle}: keyboard simulator not available — skipping paste", cycleCount);
                 }
 
-                if (proxyReady && !string.IsNullOrWhiteSpace(_settings.Proxy.BackendModel))
-                {
-                    Console.WriteLine("[STT] Submitting to proxy for TTS response...");
-                    _logger.LogInformation("[STT] Cycle {Cycle}: submitting to proxy at localhost:{Port} for TTS (model={Model})...", cycleCount, _settings.Proxy.Port, _settings.Proxy.BackendModel);
-                    await SubmitToProxyAsync(finalText, cancellationToken);
-                    _logger.LogInformation("[STT] Cycle {Cycle}: proxy response received — TTS playback started", cycleCount);
-                    Console.WriteLine("[STT] Done. Waiting for next trigger...");
-                }
-                else
-                {
-                    Console.WriteLine("[STT] Done. Waiting for next trigger...");
-                }
-
+                Console.WriteLine("[STT] Done. Waiting for next trigger...");
                 _logger.LogInformation("[STT] Cycle {Cycle}: complete", cycleCount);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -217,83 +199,47 @@ public class SttRunner : ISttRunner
         _logger.LogInformation("[STT] Pipeline stopped after {Cycles} cycle(s)", cycleCount);
     }
 
-    private async Task<bool> WaitForProxyAsync(CancellationToken cancellationToken)
+    private async Task PlayBeepAsync(int frequencyHz, double durationSec, CancellationToken ct)
     {
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(TimeSpan.FromSeconds(10));
-
-        var client = _httpClientFactory.CreateClient("OpenRouter");
-        var attempt = 0;
-
-        while (!cts.Token.IsCancellationRequested)
-        {
-            attempt++;
-            try
-            {
-                var response = await client.GetAsync($"http://localhost:{_settings.Proxy.Port}/v1/models", cts.Token);
-                _logger.LogDebug("[STT] Proxy health check attempt {Attempt}: HTTP {Status}", attempt, (int)response.StatusCode);
-                if (response.IsSuccessStatusCode)
-                    return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug("[STT] Proxy health check attempt {Attempt} failed: {Error}", attempt, ex.Message);
-            }
-
-            try
-            {
-                await Task.Delay(500, cts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-        }
-
-        return false;
-    }
-
-    private async Task SubmitToProxyAsync(string text, CancellationToken cancellationToken)
-    {
-        var client = _httpClientFactory.CreateClient("OpenRouter");
-
-        var requestBody = new
-        {
-            model = _settings.Proxy.BackendModel,
-            messages = new[] { new { role = "user", content = text } },
-            stream = false
-        };
-
-        var json = JsonSerializer.Serialize(requestBody);
-        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-
-        var request = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{_settings.Proxy.Port}/v1/chat/completions")
-        {
-            Content = content
-        };
-
         try
         {
-            var response = await client.SendAsync(request, cancellationToken);
-            _logger.LogInformation("[STT] Proxy response: HTTP {Status}", (int)response.StatusCode);
+            var beepFile = Path.Combine(Path.GetTempPath(), $"stt_beep_{frequencyHz}.mp3");
 
-            if (!response.IsSuccessStatusCode)
+            if (!File.Exists(beepFile))
             {
-                var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
-                _logger.LogWarning("[STT] Proxy returned non-success: HTTP {Status} — {Error}", (int)response.StatusCode, errorBody.Length > 200 ? errorBody[..200] + "..." : errorBody);
+                _logger.LogInformation("[STT] Generating beep file {Hz}Hz", frequencyHz);
+                var genArgs = $"-y -f lavfi -i \"sine=frequency={frequencyHz}:duration={durationSec}\" -ac 1 -ar 16000 -acodec libmp3lame -b:a 32k \"{beepFile}\"";
+                var genPsi = new ProcessStartInfo
+                {
+                    FileName = _settings.Stt.FfmpegPath,
+                    Arguments = genArgs,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var genProc = Process.Start(genPsi);
+                await genProc!.WaitForExitAsync(ct);
             }
-        }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogWarning(ex, "[STT] Proxy submission failed (connection error): {Message}", ex.Message);
-        }
-        catch (TaskCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
+
+            var playArgs = $"-nodisp -autoexit -volume 80 \"{beepFile}\"";
+            var playPsi = new ProcessStartInfo
+            {
+                FileName = "ffplay",
+                Arguments = playArgs,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            _logger.LogInformation("[STT] Playing beep: {Hz}Hz {Duration}s", frequencyHz, durationSec);
+            using var playProc = Process.Start(playPsi);
+            await playProc!.WaitForExitAsync(ct);
+            _logger.LogInformation("[STT] Beep finished: {Hz}Hz (exit {ExitCode})", frequencyHz, playProc.ExitCode);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[STT] Proxy submission failed: {Message}", ex.Message);
+            _logger.LogWarning(ex, "[STT] Beep playback failed: {Error}", ex.Message);
         }
     }
 }

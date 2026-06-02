@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using benow_conversation.Configuration;
@@ -7,16 +8,24 @@ using Microsoft.Extensions.Options;
 
 namespace benow_conversation.Services.Stt;
 
-public partial class EvdevMediaKeyTrigger : IRecordingTrigger
+public partial class EvdevMediaKeyTrigger : IRecordingTrigger, IDisposable
 {
     private const ushort EV_KEY = 0x01;
     private const ushort KEY_PLAYPAUSE = 164;
     private const ushort KEY_MEDIA = 226;
+    private const ushort KEY_PLAYCD = 200;
+    private const ushort KEY_PAUSECD = 201;
     private const int INPUT_EVENT_SIZE = 24;
-    private const ushort BUS_BLUETOOTH = 0x05;
+
+    private static readonly HashSet<ushort> DefaultTriggerCodes =
+    [
+        KEY_PLAYPAUSE, KEY_MEDIA, KEY_PLAYCD, KEY_PAUSECD
+    ];
 
     private readonly ILogger<EvdevMediaKeyTrigger> _logger;
     private readonly int _debounceMs;
+    private readonly HashSet<ushort> _triggerCodes;
+    private readonly string? _configuredDevice;
     private readonly Channel<bool> _channel = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
     {
         FullMode = BoundedChannelFullMode.DropOldest,
@@ -24,11 +33,12 @@ public partial class EvdevMediaKeyTrigger : IRecordingTrigger
         SingleWriter = false
     });
 
-    private readonly List<FileStream> _streams = [];
+    private readonly List<int> _fds = [];
     private readonly List<Task> _readerTasks = [];
     private readonly CancellationTokenSource _readCts = new();
     private long _lastTriggerTicks;
     private readonly bool _isAvailable;
+    private int _totalKeyEventsLogged;
 
     public bool IsAvailable => _isAvailable;
 
@@ -36,12 +46,29 @@ public partial class EvdevMediaKeyTrigger : IRecordingTrigger
     {
         _logger = logger;
         _debounceMs = settings.Value.Stt.TriggerDebounceMs;
+        _configuredDevice = settings.Value.Stt.TriggerDevice;
+        _triggerCodes = ParseTriggerCodes(settings.Value.Stt.TriggerCodes) ?? DefaultTriggerCodes;
         _isAvailable = Initialize();
+    }
+
+    private static HashSet<ushort>? ParseTriggerCodes(string? codes)
+    {
+        if (string.IsNullOrWhiteSpace(codes))
+            return null;
+
+        var result = new HashSet<ushort>();
+        foreach (var part in codes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (ushort.TryParse(part, out var code))
+                result.Add(code);
+        }
+
+        return result.Count > 0 ? result : null;
     }
 
     private bool Initialize()
     {
-        _logger.LogInformation("[Trigger] Initializing evdev media key monitor...");
+        _logger.LogInformation("[Trigger] Initializing evdev media key monitor (using poll/read)...");
 
         if (!Directory.Exists("/dev/input"))
         {
@@ -49,74 +76,214 @@ public partial class EvdevMediaKeyTrigger : IRecordingTrigger
             return false;
         }
 
-        var deviceNames = ParseProcBusInputDevices();
-        var eventFiles = Directory.GetFiles("/dev/input", "event*")
-            .OrderBy(f => int.TryParse(Regex.Match(f, @"\d+").Value, out var n) ? n : int.MaxValue)
-            .ToList();
+        var deviceNames = LinuxInterop.ParseProcBusInputDevices();
+        var btDevices = deviceNames.Where(kvp => kvp.Value.Contains("[BT]")).ToList();
+        var avrcpDevices = deviceNames.Where(kvp => kvp.Value.Contains("AVRCP")).ToList();
 
-        _logger.LogInformation("[Trigger] Found {Count} input devices in /dev/input", eventFiles.Count);
+        _logger.LogInformation("[Trigger] Found {Total} input devices, {Bt} Bluetooth, {Avrcp} AVRCP",
+            deviceNames.Count, btDevices.Count, avrcpDevices.Count);
+
+        foreach (var (path, name) in avrcpDevices)
+            _logger.LogInformation("[Trigger] AVRCP device: {Path} ({Name})", path, name);
+
+        foreach (var (path, name) in btDevices.Where(b => !b.Value.Contains("AVRCP")))
+            _logger.LogDebug("[Trigger] BT non-AVRCP: {Path} ({Name})", path, name);
+
+        List<string> devicesToOpen;
+
+        if (!string.IsNullOrWhiteSpace(_configuredDevice))
+        {
+            var resolved = ResolveConfiguredDevice(deviceNames);
+            if (resolved != null)
+            {
+                devicesToOpen = [resolved];
+            }
+            else
+            {
+                _logger.LogWarning("[Trigger] Configured device '{Device}' not found — falling back to scanning all", _configuredDevice);
+                devicesToOpen = GetAllEventFiles();
+            }
+        }
+        else
+        {
+            devicesToOpen = GetAllEventFiles();
+        }
+
+        _logger.LogInformation("[Trigger] Opening {Count} device(s)", devicesToOpen.Count);
 
         var monitorCount = 0;
+        var accessDenied = 0;
 
-        foreach (var eventFile in eventFiles)
+        foreach (var devicePath in devicesToOpen)
         {
-            var deviceName = deviceNames.GetValueOrDefault(eventFile, "unknown");
+            var deviceName = deviceNames.GetValueOrDefault(devicePath, "unknown");
 
-            FileStream stream;
-            try
+            var fd = LinuxInterop.open(devicePath, LinuxInterop.O_RDONLY);
+            if (fd < 0)
             {
-                stream = new FileStream(eventFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                _logger.LogDebug("[Trigger] No access to {Device}: {Error} (user may need 'input' group)", eventFile, ex.Message);
+                var errno = Marshal.GetLastWin32Error();
+                if (errno == LinuxInterop.EACCES)
+                {
+                    accessDenied++;
+                    _logger.LogDebug("[Trigger] No access to {Device} ({Name}) — user needs 'input' group", devicePath, deviceName);
+                }
+                else
+                {
+                    _logger.LogDebug("[Trigger] Cannot open {Device} ({Name}): errno={Errno}", devicePath, deviceName, errno);
+                }
                 continue;
             }
-            catch (Exception ex)
-            {
-                _logger.LogDebug("[Trigger] Cannot open {Device}: {Error}", eventFile, ex.Message);
-                continue;
-            }
 
-            _streams.Add(stream);
-            _logger.LogInformation("[Trigger] Monitoring: {Device} ({Name})", eventFile, deviceName);
-            StartDeviceReader(stream, eventFile);
+            _fds.Add(fd);
+            _logger.LogInformation("[Trigger] Monitoring: {Device} ({Name})", devicePath, deviceName);
+            StartDeviceReader(fd, devicePath);
             monitorCount++;
         }
 
         if (monitorCount == 0)
         {
-            _logger.LogWarning("[Trigger] No input devices accessible. Add user to 'input' group: sudo usermod -aG input $USER");
+            if (accessDenied > 0)
+            {
+                _logger.LogError("[Trigger] {Count} device(s) found but ALL denied access. Fix: sudo usermod -aG input $USER then re-login",
+                    accessDenied);
+                _logger.LogInformation("[Trigger] Verify with: groups | grep input");
+            }
+            else
+            {
+                _logger.LogWarning("[Trigger] No /dev/input/event* devices found");
+            }
             return false;
         }
 
-        _logger.LogInformation("[Trigger] Monitoring {Count} device(s) for media key events (KEY_PLAYPAUSE={PlayPause}, KEY_MEDIA={Media})", monitorCount, KEY_PLAYPAUSE, KEY_MEDIA);
+        if (avrcpDevices.Count == 0 && monitorCount > 0)
+        {
+            _logger.LogWarning("[Trigger] No AVRCP device detected — Bluetooth earbuds may not be connected");
+            _logger.LogInformation("[Trigger] Check with: grep -i avrcp /proc/bus/input/devices");
+        }
+
+        _logger.LogInformation("[Trigger] Monitoring {Count} device(s) for codes: {Codes}",
+            monitorCount, string.Join(", ", _triggerCodes.Select(c => $"{c} ({LinuxInterop.GetKeyCodeName((ushort)c)})")));
         return true;
     }
 
-    private void StartDeviceReader(FileStream stream, string devicePath)
+    private string? ResolveConfiguredDevice(Dictionary<string, string> deviceNames)
+    {
+        if (_configuredDevice!.StartsWith("/dev/input/event") && File.Exists(_configuredDevice))
+        {
+            _logger.LogInformation("[Trigger] Using configured device path: {Device}", _configuredDevice);
+            return _configuredDevice;
+        }
+
+        foreach (var (path, name) in deviceNames)
+        {
+            var compareName = name.Replace(" [BT]", "");
+            if (string.Equals(compareName, _configuredDevice, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, _configuredDevice, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("[Trigger] Resolved device '{Name}' → {Path}", _configuredDevice, path);
+                return path;
+            }
+        }
+
+        foreach (var (path, name) in deviceNames)
+        {
+            var compareName = name.Replace(" [BT]", "");
+            if (compareName.Contains(_configuredDevice, StringComparison.OrdinalIgnoreCase) ||
+                name.Contains(_configuredDevice, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("[Trigger] Resolved device (partial match) '{Name}' → {Path}", _configuredDevice, path);
+                return path;
+            }
+        }
+
+        return null;
+    }
+
+    private static List<string> GetAllEventFiles()
+    {
+        return Directory.GetFiles("/dev/input", "event*")
+            .OrderBy(f => int.TryParse(Regex.Match(f, @"\d+").Value, out var n) ? n : int.MaxValue)
+            .ToList();
+    }
+
+    private void StartDeviceReader(int fd, string devicePath)
     {
         var task = Task.Run(() =>
         {
             var buffer = new byte[INPUT_EVENT_SIZE];
-            _logger.LogDebug("[Trigger] Reader started for {Device}", devicePath);
+            var pfd = new LinuxInterop.PollFd { fd = fd, events = LinuxInterop.POLLIN };
+            var pollFds = new[] { pfd };
+
+            _logger.LogDebug("[Trigger] Reader started for {Device} (fd={Fd})", devicePath, fd);
 
             while (!_readCts.Token.IsCancellationRequested)
             {
                 try
                 {
-                    var read = stream.Read(buffer, 0, INPUT_EVENT_SIZE);
-                    if (read < INPUT_EVENT_SIZE)
+                    var pollResult = LinuxInterop.poll(pollFds, new UIntPtr(1), 1000);
+
+                    if (pollResult < 0)
+                    {
+                        var errno = Marshal.GetLastWin32Error();
+                        if (errno == LinuxInterop.EINTR) continue;
+                        _logger.LogError("[Trigger] poll() error on {Device}: errno={Errno}", devicePath, errno);
+                        break;
+                    }
+
+                    if (pollResult == 0) continue;
+
+                    if ((pollFds[0].revents & (LinuxInterop.POLLERR | LinuxInterop.POLLHUP)) != 0)
+                    {
+                        _logger.LogWarning("[Trigger] Device {Device} disconnected (revents={Events})", devicePath, pollFds[0].revents);
+                        break;
+                    }
+
+                    if ((pollFds[0].revents & LinuxInterop.POLLIN) == 0) continue;
+
+                    var bytesRead = (int)LinuxInterop.read(fd, buffer, new IntPtr(INPUT_EVENT_SIZE));
+
+                    if (bytesRead < 0)
+                    {
+                        var errno = Marshal.GetLastWin32Error();
+                        if (errno == LinuxInterop.EINTR) continue;
+                        _logger.LogError("[Trigger] read() error on {Device}: errno={Errno}", devicePath, errno);
+                        break;
+                    }
+
+                    if (bytesRead == 0)
+                    {
+                        _logger.LogWarning("[Trigger] EOF on {Device} — device disconnected?", devicePath);
+                        break;
+                    }
+
+                    if (bytesRead < INPUT_EVENT_SIZE)
+                    {
+                        _logger.LogDebug("[Trigger] Partial read ({Read}/{Expected}) on {Device}", bytesRead, INPUT_EVENT_SIZE, devicePath);
                         continue;
+                    }
 
                     var type = BitConverter.ToUInt16(buffer, 16);
                     var code = BitConverter.ToUInt16(buffer, 18);
                     var value = BitConverter.ToInt32(buffer, 20);
 
+                    if (type == EV_KEY)
+                    {
+                        var logged = Interlocked.Increment(ref _totalKeyEventsLogged);
+                        if (logged <= 20)
+                        {
+                            _logger.LogInformation("[Trigger] KEY event on {Device}: code={Code} ({Name}), value={Value} (press=1, release=0, repeat=2)",
+                                devicePath, code, LinuxInterop.GetKeyCodeName(code), value);
+                        }
+                        else if (logged == 21)
+                        {
+                            _logger.LogInformation("[Trigger] Suppressing further KEY event logs (logged {Count} events)", logged);
+                        }
+                    }
+
                     if (type != EV_KEY || value != 1)
                         continue;
 
-                    if (code == KEY_PLAYPAUSE || code == KEY_MEDIA)
+                    if (_triggerCodes.Contains(code))
                     {
                         var now = DateTime.UtcNow.Ticks;
                         var last = Interlocked.Read(ref _lastTriggerTicks);
@@ -124,20 +291,16 @@ public partial class EvdevMediaKeyTrigger : IRecordingTrigger
 
                         if (elapsed < _debounceMs)
                         {
-                            _logger.LogDebug("[Trigger] Debounced media key event on {Device}: code={Code} ({Elapsed:F0}ms < {Debounce}ms)", devicePath, code, elapsed, _debounceMs);
+                            _logger.LogDebug("[Trigger] Debounced key={Code} ({Name}) on {Device} ({Elapsed:F0}ms < {Debounce}ms)",
+                                code, LinuxInterop.GetKeyCodeName(code), devicePath, elapsed, _debounceMs);
                             continue;
                         }
 
                         Interlocked.Exchange(ref _lastTriggerTicks, now);
-                        var keyName = code == KEY_PLAYPAUSE ? "KEY_PLAYPAUSE" : "KEY_MEDIA";
-                        _logger.LogInformation("[Trigger] Media key detected on {Device}: {Key} (code={Code})", devicePath, keyName, code);
+                        _logger.LogInformation("[Trigger] TRIGGER DETECTED on {Device}: key={Code} ({Name})",
+                            devicePath, code, LinuxInterop.GetKeyCodeName(code));
                         _channel.Writer.TryWrite(true);
                     }
-                }
-                catch (ObjectDisposedException)
-                {
-                    _logger.LogDebug("[Trigger] Stream closed for {Device}", devicePath);
-                    break;
                 }
                 catch (OperationCanceledException)
                 {
@@ -158,7 +321,7 @@ public partial class EvdevMediaKeyTrigger : IRecordingTrigger
 
     public async Task WaitForTriggerAsync(CancellationToken ct)
     {
-        _logger.LogInformation("[Trigger] Waiting for media key event (earbud stem pinch)...");
+        _logger.LogInformation("[Trigger] Waiting for media key event...");
         try
         {
             await _channel.Reader.ReadAsync(ct);
@@ -171,71 +334,20 @@ public partial class EvdevMediaKeyTrigger : IRecordingTrigger
         }
         catch (ChannelClosedException)
         {
-            _logger.LogWarning("[Trigger] Channel closed — no more trigger events possible");
+            _logger.LogWarning("[Trigger] Channel closed — no more trigger events");
             throw new OperationCanceledException("Trigger channel closed");
         }
     }
 
-    private static Dictionary<string, string> ParseProcBusInputDevices()
+    public void Dispose()
     {
-        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        try
+        _readCts.Cancel();
+        try { Task.WaitAll(_readerTasks.ToArray(), TimeSpan.FromSeconds(2)); } catch { }
+        foreach (var fd in _fds)
         {
-            if (!File.Exists("/proc/bus/input/devices"))
-                return names;
-
-            var lines = File.ReadAllLines("/proc/bus/input/devices");
-            string? currentName = null;
-            string? currentHandlers = null;
-            ushort? currentBus = null;
-
-            foreach (var line in lines)
-            {
-                if (line.StartsWith("I: Bus="))
-                {
-                    var busStr = line.Substring(7).Split()[0];
-                    ushort.TryParse(busStr, System.Globalization.NumberStyles.HexNumber, null, out var bus);
-                    currentBus = bus;
-                }
-                else if (line.StartsWith("N: Name="))
-                {
-                    currentName = line[9..].Trim('"');
-                }
-                else if (line.StartsWith("H: Handlers="))
-                {
-                    currentHandlers = line[12..];
-                }
-                else if (string.IsNullOrEmpty(line))
-                {
-                    if (currentHandlers != null && currentName != null)
-                    {
-                        foreach (Match m in EventNumberRegex().Matches(currentHandlers))
-                        {
-                            names[$"/dev/input/event{m.Groups[1].Value}"] = currentName + (currentBus == BUS_BLUETOOTH ? " [BT]" : "");
-                        }
-                    }
-
-                    currentName = null;
-                    currentHandlers = null;
-                    currentBus = null;
-                }
-            }
-
-            if (currentHandlers != null && currentName != null)
-            {
-                foreach (Match m in EventNumberRegex().Matches(currentHandlers))
-                {
-                    names[$"/dev/input/event{m.Groups[1].Value}"] = currentName + (currentBus == BUS_BLUETOOTH ? " [BT]" : "");
-                }
-            }
+            try { LinuxInterop.close(fd); } catch { }
         }
-        catch (Exception)
-        {
-        }
-
-        return names;
+        _fds.Clear();
+        _readCts.Dispose();
     }
-
-    [GeneratedRegex(@"event(\d+)", RegexOptions.Compiled)]
-    private static partial Regex EventNumberRegex();
 }

@@ -17,7 +17,7 @@ public class TtsService : ITtsService
     private readonly AppSettings _settings;
     private readonly ILogger<TtsService> _logger;
     private readonly IAudioConverter _audioConverter;
-    private readonly ConcurrentDictionary<string, string> _modelFormats = new();
+    private readonly ProviderFormatCache _formatCache;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -29,12 +29,15 @@ public class TtsService : ITtsService
         IHttpClientFactory httpClientFactory,
         IOptions<AppSettings> settings,
         ILogger<TtsService> logger,
-        IAudioConverter audioConverter)
+        IAudioConverter audioConverter,
+        ProviderFormatCache formatCache)
     {
         _httpClientFactory = httpClientFactory;
         _settings = settings.Value;
         _logger = logger;
         _audioConverter = audioConverter;
+        _formatCache = formatCache;
+        _formatCache.EnsureLoaded();
     }
 
     public async Task<string> SynthesizeToFileAsync(
@@ -53,10 +56,11 @@ public class TtsService : ITtsService
         var outputFormat = _settings.Audio.OutputFormat;
         var apiFormat = outputFormat;
 
-        if (_modelFormats.TryGetValue(resolvedModel, out var cachedFormat))
+        var cacheKey = $"openrouter/{resolvedModel}";
+        if (_formatCache.Get(cacheKey) is AudioFormat cached && !string.IsNullOrEmpty(cached.Codec))
         {
-            apiFormat = cachedFormat;
-            _logger.LogInformation("Using cached API format '{Cached}' for model {Model}", cachedFormat, resolvedModel);
+            apiFormat = cached.Codec;
+            _logger.LogInformation("Using cached API format '{Cached}' for model {Model}", cached.Codec, resolvedModel);
         }
 
         var request = new TtsRequest
@@ -97,12 +101,12 @@ public class TtsService : ITtsService
         try
         {
             audioBytes = await ReadAudioResponseAsync(response);
-            if (!_modelFormats.ContainsKey(resolvedModel))
-                _modelFormats.TryAdd(resolvedModel, apiFormat);
+            if (_formatCache.Get(cacheKey) == null)
+                _formatCache.Set(cacheKey, new AudioFormat(apiFormat, 24000, 1, 16));
         }
         catch (InvalidOperationException ex) when (IsFormatError(ex) && apiFormat != "pcm")
         {
-            _modelFormats.TryAdd(resolvedModel, "pcm");
+            _formatCache.Set(cacheKey, new AudioFormat("pcm", 24000, 1, 16));
             _logger.LogWarning("Model {Model} does not support '{Format}', retrying with PCM (cached for session)", resolvedModel, apiFormat);
 
             request.ResponseFormat = "pcm";
@@ -169,10 +173,11 @@ public class TtsService : ITtsService
         var resolvedModel = model ?? _settings.OpenRouter.TtsModel;
         var apiFormat = _settings.Audio.OutputFormat;
 
-        if (_modelFormats.TryGetValue(resolvedModel, out var cachedFormat))
+        var cacheKey = $"openrouter/{resolvedModel}";
+        if (_formatCache.Get(cacheKey) is AudioFormat cached && !string.IsNullOrEmpty(cached.Codec))
         {
-            apiFormat = cachedFormat;
-            _logger.LogInformation("Using cached API format '{Cached}' for model {Model}", cachedFormat, resolvedModel);
+            apiFormat = cached.Codec;
+            _logger.LogInformation("Using cached API format '{Cached}' for model {Model}", cached.Codec, resolvedModel);
         }
 
         var request = new TtsRequest
@@ -212,12 +217,12 @@ public class TtsService : ITtsService
         try
         {
             audioBytes = await ReadAudioResponseAsync(response);
-            if (!_modelFormats.ContainsKey(resolvedModel))
-                _modelFormats.TryAdd(resolvedModel, apiFormat);
+            if (_formatCache.Get(cacheKey) == null)
+                _formatCache.Set(cacheKey, new AudioFormat(apiFormat, 24000, 1, 16));
         }
         catch (InvalidOperationException ex) when (IsFormatError(ex) && apiFormat != "pcm")
         {
-            _modelFormats.TryAdd(resolvedModel, "pcm");
+            _formatCache.Set(cacheKey, new AudioFormat("pcm", 24000, 1, 16));
             _logger.LogWarning("Model {Model} does not support '{Format}', retrying with PCM (cached for session)", resolvedModel, apiFormat);
 
             request.ResponseFormat = "pcm";
@@ -231,6 +236,98 @@ public class TtsService : ITtsService
         _logger.LogInformation("Stream audio received: {Size} bytes ({Format}) in {ElapsedMs}ms", audioBytes.Length, apiFormat, sw.ElapsedMilliseconds);
 
         return (new MemoryStream(audioBytes), apiFormat);
+    }
+
+    public async Task<Stream> SynthesizeLiveStreamAsync(
+        string text,
+        string? voice = null,
+        string? instructions = null,
+        double? temperature = null,
+        int? seed = null,
+        string? model = null)
+    {
+        ValidateApiKey();
+
+        var resolvedVoice = voice ?? "alloy";
+        var resolvedModel = model ?? _settings.OpenRouter.TtsModel;
+        var apiFormat = _settings.Audio.OutputFormat;
+
+        var cacheKey = $"openrouter/{resolvedModel}";
+        if (_formatCache.Get(cacheKey) is AudioFormat cached && !string.IsNullOrEmpty(cached.Codec))
+            apiFormat = cached.Codec;
+
+        if (_formatCache.Get(cacheKey) == null)
+        {
+            _logger.LogInformation("Format not cached for {Model} — using buffered path first", resolvedModel);
+            var (ms, fmt) = await SynthesizeToStreamAsync(text, voice, instructions, temperature, seed, model);
+            ms.Position = 0;
+            return ms;
+        }
+
+        var request = new TtsRequest
+        {
+            Model = resolvedModel,
+            Input = text,
+            Voice = resolvedVoice,
+            ResponseFormat = apiFormat,
+            Temperature = temperature,
+            Seed = seed
+        };
+
+        if (!string.IsNullOrWhiteSpace(instructions) && resolvedModel.StartsWith("openai/", StringComparison.OrdinalIgnoreCase))
+        {
+            request.Provider = new ProviderOptions
+            {
+                Options = new Dictionary<string, Dictionary<string, string>>
+                {
+                    ["openai"] = new() { ["instructions"] = instructions }
+                }
+            };
+        }
+
+        _logger.LogInformation("Live stream synthesis: model={Model}, voice={Voice}, format={Format}, textLength={Length}",
+            request.Model, request.Voice, apiFormat, text.Length);
+
+        var client = _httpClientFactory.CreateClient("OpenRouter");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _settings.OpenRouter.ApiKey);
+
+        var response = await client.SendAsync(
+            new HttpRequestMessage(HttpMethod.Post, $"{_settings.OpenRouter.BaseUrl}/audio/speech")
+            {
+                Content = JsonContent.Create(request, options: JsonOptions)
+            },
+            HttpCompletionOption.ResponseHeadersRead);
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden)
+        {
+            response.Dispose();
+            throw new InvalidOperationException("OpenRouter API key is invalid or unauthorized.");
+        }
+
+        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+        {
+            response.Dispose();
+            throw new InvalidOperationException("OpenRouter rate limit exceeded.");
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync();
+            response.Dispose();
+            throw new InvalidOperationException($"TTS API failed (HTTP {(int)response.StatusCode}): {TryExtractErrorMessage(errorBody)}");
+        }
+
+        var contentType = response.Content.Headers.ContentType?.MediaType;
+        if (contentType != null && contentType.Contains("json"))
+        {
+            var errorBody = await response.Content.ReadAsStringAsync();
+            response.Dispose();
+            throw new InvalidOperationException($"TTS API error: {TryExtractErrorMessage(errorBody)}");
+        }
+
+        _logger.LogInformation("Live stream response headers received (HTTP {Status})", (int)response.StatusCode);
+
+        return await response.Content.ReadAsStreamAsync();
     }
 
     public async Task<List<string>> SynthesizeAllVoicesAsync(

@@ -48,7 +48,15 @@ public class GroqWhisperTranscriber : ITranscriptionService
         using var content = new MultipartFormDataContent();
         await using var fileStream = File.OpenRead(audioFilePath);
         var fileContent = new StreamContent(fileStream);
-        fileContent.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
+        var ext = Path.GetExtension(audioFilePath).TrimStart('.').ToLowerInvariant();
+        var contentType = ext switch
+        {
+            "mp3" => "audio/mpeg",
+            "mp4" or "m4a" => "audio/mp4",
+            "webm" => "audio/webm",
+            _ => "audio/wav"
+        };
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         content.Add(fileContent, "file", Path.GetFileName(audioFilePath));
         content.Add(new StringContent(_settings.Model), "model");
         content.Add(new StringContent("json"), "response_format");

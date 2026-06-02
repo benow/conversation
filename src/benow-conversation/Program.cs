@@ -55,6 +55,28 @@ var host = Host.CreateDefaultBuilder()
         services.AddSingleton<IAudioPlayer, AudioPlayer>();
         services.AddSingleton<ISpeechQueue, SpeechQueue>();
         services.AddSingleton<IProxyService, ProxyService>();
+        services.AddSingleton<ProviderFormatCache>();
+        services.AddSingleton<AudioFormatConverter>();
+
+        services.AddSingleton<IPersistentAudioPipeline>(sp =>
+        {
+            var logger = sp.GetRequiredService<ILogger<PersistentAudioPipeline>>();
+            var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
+            var audioPlayer = sp.GetRequiredService<IAudioPlayer>();
+            if (!audioPlayer.IsAvailable)
+                return null!;
+
+            var defaultProfile = settings.OutputProfiles.FirstOrDefault(p => p.Value.IsDefault).Value;
+            var volume = defaultProfile?.Volume;
+            var device = string.IsNullOrEmpty(defaultProfile?.Device) ? null : defaultProfile.Device;
+
+            return new PersistentAudioPipeline(
+                logger,
+                settings,
+                ffplayPath: "ffplay",
+                volume: volume,
+                device: device);
+        });
 
         RegisterSttServices(services, context.Configuration);
 
@@ -66,9 +88,48 @@ var host = Host.CreateDefaultBuilder()
         {
             client.Timeout = TimeSpan.FromMinutes(5);
         });
-        services.AddHttpClient("Groq", client =>
+        services.AddHttpClient("Groq", (sp, client) =>
         {
+            var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
             client.Timeout = TimeSpan.FromMinutes(2);
+            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", settings.Groq.ApiKey);
+        });
+
+        services.AddSingleton<IPersonaAllocator, PersonaAllocator>();
+        services.AddSingleton<IModifierInjector, ModifierInjector>();
+        services.AddSingleton<ICharacterNormalizer, CharacterNormalizer>();
+        services.AddSingleton<ParallelTtsPlayer>();
+
+        services.AddSingleton<ITtsProvider>(sp =>
+        {
+            var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
+            return settings.TtsBackend switch
+            {
+                "kokoro" => ActivatorUtilities.CreateInstance<KokoroTtsProvider>(sp),
+                "replicate" => ActivatorUtilities.CreateInstance<ReplicateTtsProvider>(sp),
+                _ => ActivatorUtilities.CreateInstance<OpenRouterTtsProvider>(sp)
+            };
+        });
+
+        services.AddHttpClient("ModifierInjector", (sp, client) =>
+        {
+            var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
+            client.Timeout = TimeSpan.FromMilliseconds(settings.MultiCharacter.ModifierTimeoutMs);
+        });
+
+        services.AddHttpClient("CharacterNormalizer", (sp, client) =>
+        {
+            var settings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
+            client.Timeout = TimeSpan.FromMilliseconds(settings.MultiCharacter.NormalizerTimeoutMs);
+        });
+
+        services.AddHttpClient("KokoroTts", client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(30);
+        });
+        services.AddHttpClient("Replicate", client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(120);
         });
     })
     .Build();
@@ -105,6 +166,7 @@ var listOutputProfiles = false;
 var daemonMode = false;
 var noPlay = false;
 var sttMode = false;
+var sttSetup = false;
 var noCleanup = false;
 string? cleanupModelOverride = null;
 
@@ -210,6 +272,8 @@ for (var i = 0; i < cliArgs.Length; i++)
         daemonMode = true;
     else if (cliArgs[i] == "--stt")
         sttMode = true;
+    else if (cliArgs[i] == "--stt-setup")
+        sttSetup = true;
     else if (cliArgs[i] == "--no-cleanup")
         noCleanup = true;
     else if (cliArgs[i] == "--cleanup-model" && i + 1 < cliArgs.Length)
@@ -251,11 +315,23 @@ try
         Log.Information("Cleanup model override: {Model}", cleanupModelOverride);
     }
 
+    if (sttSetup)
+    {
+        PipeWireRecorder.KillOrphanedProcesses();
+        var exitCode = await SttSetup.RunAsync(projectRoot);
+        Log.Information("Application ended (stt-setup, code={Code})", exitCode);
+        await Log.CloseAndFlushAsync();
+        return;
+    }
+
     if (sttMode && daemonMode)
     {
+        PipeWireRecorder.KillOrphanedProcesses();
+
         var proxyService = host.Services.GetRequiredService<IProxyService>();
         var speechQueue = host.Services.GetRequiredService<ISpeechQueue>();
         var sttRunner = host.Services.GetRequiredService<ISttRunner>();
+        var pipeline = host.Services.GetRequiredService<IPersistentAudioPipeline>();
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -265,6 +341,8 @@ try
         };
 
         Log.Information("Starting STT + daemon mode...");
+        if (pipeline != null)
+            await pipeline.StartAsync(cts.Token);
         await speechQueue.StartAsync(cts.Token);
 
         var proxyTask = proxyService.RunAsync(cts.Token);
@@ -276,6 +354,8 @@ try
         try { await Task.WhenAll(proxyTask, sttTask); } catch { }
 
         await speechQueue.StopAsync(CancellationToken.None);
+        if (pipeline is IAsyncDisposable d)
+            await d.DisposeAsync();
         Log.Information("STT + daemon stopped");
         await Log.CloseAndFlushAsync();
         return;
@@ -283,6 +363,8 @@ try
 
     if (sttMode)
     {
+        PipeWireRecorder.KillOrphanedProcesses();
+
         var sttRunner = host.Services.GetRequiredService<ISttRunner>();
 
         using var cts = new CancellationTokenSource();
@@ -299,8 +381,15 @@ try
 
     if (daemonMode)
     {
+        var mcSettings = host.Services.GetRequiredService<IOptions<AppSettings>>().Value.MultiCharacter;
+        var logger = host.Services.GetRequiredService<ILogger<Program>>();
+        var fixturesDir = Path.Combine(AppContext.BaseDirectory, "fixtures");
+        ProxyService.CheckPendingRegressionTests(
+            mcSettings.EnforceRegressionTests, logger, fixturesDir);
+
         var proxyService = host.Services.GetRequiredService<IProxyService>();
         var speechQueue = host.Services.GetRequiredService<ISpeechQueue>();
+        var pipeline = host.Services.GetRequiredService<IPersistentAudioPipeline>();
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -310,6 +399,8 @@ try
         };
 
         Log.Information("Starting proxy daemon...");
+        if (pipeline != null)
+            await pipeline.StartAsync(cts.Token);
         await speechQueue.StartAsync(cts.Token);
 
         try
@@ -322,6 +413,8 @@ try
         }
 
         await speechQueue.StopAsync(CancellationToken.None);
+        if (pipeline is IAsyncDisposable d)
+            await d.DisposeAsync();
         Log.Information("Daemon stopped");
         await Log.CloseAndFlushAsync();
         return;
@@ -892,6 +985,9 @@ static void RegisterSttServices(IServiceCollection services, IConfiguration conf
         case "llm":
             services.AddSingleton<ITextTransformer, LlmTextTransformer>();
             break;
+        case "none":
+            services.AddSingleton<ITextTransformer>(_ => new NullTextTransformer());
+            break;
         default:
             throw new InvalidOperationException($"Unknown ITextTransformer implementation: '{transformer}'");
     }
@@ -921,6 +1017,10 @@ static void RegisterSttServices(IServiceCollection services, IConfiguration conf
             break;
         case "evdev-media":
             services.AddSingleton<IRecordingTrigger, EvdevMediaKeyTrigger>();
+            break;
+
+        case "evdev-keyboard":
+            services.AddSingleton<IRecordingTrigger, EvdevKeyboardTrigger>();
             break;
         default:
             throw new InvalidOperationException($"Unknown IRecordingTrigger implementation: '{trigger}'");
@@ -964,6 +1064,7 @@ static void PrintUsage(IServiceProvider services)
     Log.Information("  --set-default                   Mark persona as default (use with --save-persona or --persona)");
     Log.Information("  --daemon                        Run as OpenAI-compatible proxy (TTS on responses)");
     Log.Information("  --stt                           Start STT mode (record → transcribe → paste)");
+    Log.Information("  --stt-setup                     Interactive setup: detect trigger device and key codes");
     Log.Information("  --stt --daemon                  STT + daemon mode (both run concurrently)");
     Log.Information("  --no-cleanup                    Skip transcript cleanup step");
     Log.Information("  --cleanup-model <model>         Override cleanup LLM model");

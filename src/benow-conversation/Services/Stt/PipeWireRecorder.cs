@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using benow_conversation.Configuration;
 using benow_conversation.Services.Abstractions;
 using Microsoft.Extensions.Logging;
@@ -18,6 +19,173 @@ public class PipeWireRecorder : IAudioRecorder
         _logger = logger;
     }
 
+    public static void KillOrphanedProcesses(ILogger? logger = null)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "pgrep",
+                Arguments = "-f \"ffmpeg.*pulse.*stt_|pw-record.*stt_\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var pgrep = Process.Start(psi);
+            var output = pgrep!.StandardOutput.ReadToEnd();
+            pgrep.WaitForExit(3000);
+
+            if (pgrep.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
+                return;
+
+            var pids = output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim())
+                .Where(s => int.TryParse(s, out _))
+                .ToList();
+
+            if (pids.Count == 0)
+                return;
+
+            var msg = $"[Recorder] Found {pids.Count} orphaned recording process(es): {string.Join(", ", pids)} — killing them";
+            logger?.LogWarning(msg);
+            Console.WriteLine(msg);
+
+            var killPsi = new ProcessStartInfo
+            {
+                FileName = "kill",
+                Arguments = $"-TERM {string.Join(" ", pids)}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var killProc = Process.Start(killPsi);
+            killProc!.WaitForExit(3000);
+
+            Thread.Sleep(1000);
+
+            foreach (var pid in pids)
+            {
+                if (int.TryParse(pid, out var pidInt))
+                {
+                    try
+                    {
+                        using var check = Process.GetProcessById(pidInt);
+                        check.Kill(entireProcessTree: true);
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger?.LogDebug(ex, "[Recorder] Orphan cleanup failed: {Error}", ex.Message);
+        }
+    }
+
+    public static void EnsureAvrcpDevice(string? triggerDeviceName, ILogger? logger = null)
+    {
+        if (string.IsNullOrWhiteSpace(triggerDeviceName))
+            return;
+
+        var devices = LinuxInterop.ParseProcBusInputDevices();
+        var found = devices.Any(kvp => kvp.Value.Replace(" [BT]", "").Equals(triggerDeviceName, StringComparison.OrdinalIgnoreCase)
+            || kvp.Value.Equals(triggerDeviceName, StringComparison.OrdinalIgnoreCase));
+
+        if (found)
+            return;
+
+        var msg = $"[STT] Trigger device '{triggerDeviceName}' not found — Bluetooth may be stuck in HFP";
+        logger?.LogWarning(msg);
+        Console.WriteLine(msg);
+
+        var mac = FindBluetoothMac();
+        if (mac == null)
+        {
+            Console.WriteLine("[STT] No Bluetooth audio device found — cannot auto-reconnect");
+            return;
+        }
+
+        Console.WriteLine($"[STT] Reconnecting {mac} to restore A2DP/AVRCP...");
+        ReconnectBluetooth(mac);
+
+        for (var i = 0; i < 10; i++)
+        {
+            Thread.Sleep(1000);
+            devices = LinuxInterop.ParseProcBusInputDevices();
+            if (devices.Any(kvp => kvp.Value.Replace(" [BT]", "").Contains(triggerDeviceName, StringComparison.OrdinalIgnoreCase)))
+            {
+                Console.WriteLine($"[STT] AVRCP device restored after {(i + 1)}s");
+                return;
+            }
+        }
+
+        Console.WriteLine("[STT] AVRCP device still not found after reconnect — trigger may not work");
+    }
+
+    private static string? FindBluetoothMac()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "pw-cli",
+                Arguments = "list-objects",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var proc = Process.Start(psi);
+            var output = proc!.StandardOutput.ReadToEnd();
+            proc.WaitForExit(5000);
+
+            var match = Regex.Match(output, @"device\.name\s*=\s*""bluez_card\.([0-9A-Fa-f_]+)""");
+            if (match.Success)
+                return match.Groups[1].Value.Replace("_", ":");
+            return null;
+        }
+        catch { return null; }
+    }
+
+    private static void ReconnectBluetooth(string mac)
+    {
+        try
+        {
+            var disconnPsi = new ProcessStartInfo
+            {
+                FileName = "bluetoothctl",
+                Arguments = $"disconnect {mac}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var disconn = Process.Start(disconnPsi);
+            disconn!.WaitForExit(10000);
+        }
+        catch { }
+
+        Thread.Sleep(2000);
+
+        try
+        {
+            var connPsi = new ProcessStartInfo
+            {
+                FileName = "bluetoothctl",
+                Arguments = $"connect {mac}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var conn = Process.Start(connPsi);
+            conn!.WaitForExit(10000);
+        }
+        catch { }
+    }
+
     public bool IsAvailable
     {
         get
@@ -30,7 +198,7 @@ public class PipeWireRecorder : IAudioRecorder
                 var psi = new ProcessStartInfo
                 {
                     FileName = "which",
-                    Arguments = _settings.RecorderCommand,
+                    Arguments = _settings.FfmpegPath,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -40,14 +208,14 @@ public class PipeWireRecorder : IAudioRecorder
                 proc!.WaitForExit(3000);
                 _available = proc.ExitCode == 0;
                 if (!_available.Value)
-                    _logger.LogWarning("[Recorder] {Command} not found in PATH", _settings.RecorderCommand);
+                    _logger.LogWarning("[Recorder] {Command} not found in PATH", _settings.FfmpegPath);
                 else
-                    _logger.LogInformation("[Recorder] {Command} found in PATH", _settings.RecorderCommand);
+                    _logger.LogInformation("[Recorder] {Command} found in PATH", _settings.FfmpegPath);
                 return _available.Value;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "[Recorder] Failed to check for {Command}: {Error}", _settings.RecorderCommand, ex.Message);
+                _logger.LogWarning(ex, "[Recorder] Failed to check for {Command}: {Error}", _settings.FfmpegPath, ex.Message);
                 _available = false;
                 return false;
             }
@@ -56,16 +224,20 @@ public class PipeWireRecorder : IAudioRecorder
 
     public async Task<string> RecordToFileAsync(string outputPath, CancellationToken ct)
     {
-        if (!IsAvailable)
-            throw new InvalidOperationException($"{_settings.RecorderCommand} is not available.");
+        var ext = Path.GetExtension(outputPath).TrimStart('.');
+        if (string.IsNullOrEmpty(ext))
+            ext = _settings.RecorderFormat;
 
-        var args = $"--format s16 --rate {_settings.RecorderSampleRate} --channels {_settings.RecorderChannels} \"{outputPath}\"";
+        var tempOutput = ext.Equals("wav", StringComparison.OrdinalIgnoreCase)
+            ? outputPath
+            : Path.ChangeExtension(outputPath, "mp3");
 
-        _logger.LogInformation("[Recorder] Starting: {Command} {Args}", _settings.RecorderCommand, args);
+        var args = BuildFFmpegArgs(tempOutput);
 
+        _logger.LogInformation("[Recorder] Starting: ffmpeg {Args}", args);
         var psi = new ProcessStartInfo
         {
-            FileName = _settings.RecorderCommand,
+            FileName = _settings.FfmpegPath,
             Arguments = args,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -74,133 +246,103 @@ public class PipeWireRecorder : IAudioRecorder
         };
 
         using var process = Process.Start(psi)!;
-        _logger.LogDebug("[Recorder] Process started (PID={Pid})", process.Id);
+        _logger.LogDebug("[Recorder] ffmpeg started (PID={Pid})", process.Id);
+        var recordingStart = Stopwatch.StartNew();
 
-        using var registration = ct.Register(() =>
+        try
         {
-            _logger.LogInformation("[Recorder] Cancellation requested — sending SIGTERM to PID={Pid}", process.Id);
+            using var registration = ct.Register(() =>
+            {
+                _logger.LogInformation("[Recorder] cancelled after {Ms}ms — sending SIGTERM to PID={Pid}",
+                    recordingStart.ElapsedMilliseconds, process.Id);
+                SendTermOrKill(process);
+            });
+
             try
             {
-                var killPsi = new ProcessStartInfo
+                await process.WaitForExitAsync(ct).ConfigureAwait(false);
+                _logger.LogInformation("[Recorder] ffmpeg exited with code {ExitCode} after {Ms}ms",
+                    process.ExitCode, recordingStart.ElapsedMilliseconds);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("[Recorder] Recording stopped after {Ms}ms — waiting for ffmpeg to finalize",
+                    recordingStart.ElapsedMilliseconds);
+
+                if (!process.WaitForExit(5000))
                 {
-                    FileName = "kill",
-                    Arguments = $"-TERM {process.Id}",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                using var killProc = Process.Start(killPsi);
-                killProc!.WaitForExit(2000);
-                _logger.LogDebug("[Recorder] SIGTERM sent to PID={Pid}", process.Id);
+                    _logger.LogWarning("[Recorder] ffmpeg did not exit after SIGTERM — force killing");
+                    try { process.Kill(entireProcessTree: true); } catch { }
+                }
+
+                _logger.LogInformation("[Recorder] ffmpeg finalized (exit code {ExitCode})", process.ExitCode);
             }
-            catch (Exception ex)
+
+            if (!File.Exists(tempOutput))
             {
-                _logger.LogWarning(ex, "[Recorder] Failed to send SIGTERM to PID={Pid}: {Error}", process.Id, ex.Message);
-                try { process.Kill(entireProcessTree: true); }
-                catch { }
+                _logger.LogError("[Recorder] No output file produced");
+                throw new InvalidOperationException($"Recording produced no output file: {tempOutput}");
             }
-        });
 
-        try
-        {
-            await process.WaitForExitAsync(ct).ConfigureAwait(false);
-            _logger.LogInformation("[Recorder] Process exited with code {ExitCode}", process.ExitCode);
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogInformation("[Recorder] Recording cancelled — process terminated");
-            try { process.Kill(entireProcessTree: true); } catch { }
-        }
+            var fileSize = new FileInfo(tempOutput).Length;
+            _logger.LogInformation("[Recorder] Output: {Path} ({Size} bytes, {Duration}ms)",
+                tempOutput, fileSize, recordingStart.ElapsedMilliseconds);
 
-        if (!File.Exists(outputPath))
-        {
-            _logger.LogError("[Recorder] Output file not found: {Path}", outputPath);
-            throw new InvalidOperationException($"Recording produced no output file: {outputPath}");
-        }
-
-        var fileSize = new FileInfo(outputPath).Length;
-        _logger.LogInformation("[Recorder] Output file: {Path} ({Size} bytes)", outputPath, fileSize);
-
-        if (fileSize == 0)
-        {
-            _logger.LogError("[Recorder] Output file is empty: {Path}", outputPath);
-            throw new InvalidOperationException("Recording produced empty output.");
-        }
-
-        if (!ValidateWavHeader(outputPath))
-        {
-            _logger.LogWarning("[Recorder] WAV header invalid in {Path} — repairing with ffmpeg...", outputPath);
-            var repairedPath = await RepairWavAsync(outputPath, ct);
-            return repairedPath;
-        }
-
-        _logger.LogDebug("[Recorder] WAV header valid for {Path}", outputPath);
-        return outputPath;
-    }
-
-    private bool ValidateWavHeader(string path)
-    {
-        try
-        {
-            using var fs = File.OpenRead(path);
-            using var reader = new BinaryReader(fs);
-            var riff = reader.ReadBytes(4);
-            if (System.Text.Encoding.ASCII.GetString(riff) != "RIFF")
+            if (fileSize == 0)
             {
-                _logger.LogDebug("[Recorder] WAV validation: missing RIFF header in {Path}", path);
-                return false;
+                _logger.LogWarning("[Recorder] Output file is empty (recording too short?)");
+                throw new InvalidOperationException("Recording produced empty output.");
             }
 
-            var declaredSize = reader.ReadUInt32();
-            var actualSize = new FileInfo(path).Length - 8;
-            var valid = Math.Abs(declaredSize - actualSize) <= 1;
-            if (!valid)
-                _logger.LogDebug("[Recorder] WAV validation: size mismatch — declared={Declared}, actual={Actual}", declaredSize, actualSize);
-            return valid;
+            return tempOutput;
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogDebug(ex, "[Recorder] WAV validation failed for {Path}: {Error}", path, ex.Message);
-            return false;
+            EnsureDead(process);
         }
     }
 
-    private async Task<string> RepairWavAsync(string inputPath, CancellationToken ct)
+    private void SendTermOrKill(Process process)
     {
-        var ffmpegPath = _settings.FfmpegPath;
-        if (string.IsNullOrWhiteSpace(ffmpegPath))
-            ffmpegPath = "ffmpeg";
-
-        var repairedPath = Path.Combine(Path.GetTempPath(), $"stt_repaired_{Guid.NewGuid():N}.wav");
-
-        _logger.LogInformation("[Recorder] Running ffmpeg repair: {Ffmpeg} -i {Input} -> {Output}", ffmpegPath, inputPath, repairedPath);
-
-        var psi = new ProcessStartInfo
+        try
         {
-            FileName = ffmpegPath,
-            Arguments = $"-y -i \"{inputPath}\" -c:a pcm_s16le -ar {_settings.RecorderSampleRate} -ac {_settings.RecorderChannels} \"{repairedPath}\"",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var process = Process.Start(psi)!;
-
-        await process.WaitForExitAsync(ct);
-
-        if (process.ExitCode != 0)
-        {
-            var error = await process.StandardError.ReadToEndAsync(ct);
-            _logger.LogError("[Recorder] ffmpeg repair failed (exit {ExitCode}): {Error}", process.ExitCode, error.Length > 500 ? error[..500] + "..." : error);
-            throw new InvalidOperationException($"ffmpeg WAV repair failed (exit {process.ExitCode}): {error}");
+            var killPsi = new ProcessStartInfo
+            {
+                FileName = "kill",
+                Arguments = $"-TERM {process.Id}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var killProc = Process.Start(killPsi);
+            killProc!.WaitForExit(2000);
         }
+        catch { try { process.Kill(entireProcessTree: true); } catch { } }
+    }
 
-        var repairedSize = new FileInfo(repairedPath).Length;
-        _logger.LogInformation("[Recorder] ffmpeg repair complete: {Output} ({Size} bytes)", repairedPath, repairedSize);
+    private void EnsureDead(Process process)
+    {
+        if (process.HasExited)
+            return;
 
-        try { File.Delete(inputPath); } catch { }
-        return repairedPath;
+        _logger.LogWarning("[Recorder] ffmpeg (PID={Pid}) still alive — force killing", process.Id);
+        try { process.Kill(entireProcessTree: true); }
+        catch (Exception ex) { _logger.LogDebug(ex, "[Recorder] Kill failed (already dead?)"); }
+
+        process.WaitForExit(3000);
+    }
+
+    private string BuildFFmpegArgs(string outputPath)
+    {
+        var deviceArg = !string.IsNullOrWhiteSpace(_settings.RecorderDevice)
+            ? $" -i \"{_settings.RecorderDevice}\""
+            : " -i default";
+
+        var codecArgs = outputPath.EndsWith(".mp3")
+            ? " -acodec libmp3lame -b:a 32k"
+            : " -acodec pcm_s16le";
+
+        return $"-y -f pulse{deviceArg} -ac {_settings.RecorderChannels} -ar {_settings.RecorderSampleRate}{codecArgs} \"{outputPath}\"";
     }
 }
