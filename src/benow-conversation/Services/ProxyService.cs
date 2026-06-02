@@ -600,26 +600,24 @@ public class ProxyService : IProxyService
 
     private const string CharacterFormatPrompt = @"
 
-## Multi-Character Script Format
+## CRITICAL OUTPUT FORMAT — You MUST use bracket markers for every line
 
-You are generating a multi-character script for text-to-speech. Each line must use bracket format markers.
+Every line of your response must start with one of these markers:
+  [CharacterName:F] for female character dialogue or actions
+  [CharacterName:M] for male character dialogue or actions
+  [Self] for Andy's (the user's) actions, dialogue, and thoughts
+  [Narrator:F] for all third-person narration
 
-### Rules
-- Every line MUST start with one of: [CharacterName:F], [CharacterName:M], [Self], or [Narrator:F]
-- Narration and stage directions MUST be wrapped in *asterisks*
-- Inner thoughts MUST be wrapped in [thought]...[/thought]
-- Use [Self] for the primary participant (Andy). Use [Narrator:F] for all third-person narration.
-- NEVER output prose format like ""Character: dialogue"" or ""Character said, dialogue""
-- PRESERVE all original content — never summarize or remove text
+Actions and narration MUST be wrapped in *asterisks*.  
+Inner thoughts MUST be wrapped in [thought]...[/thought].  
+NEVER output prose like ""Name: dialogue"" or ""Name said, dialogue"".
 
-### Examples
+Examples:
 [Marina:F] *adjusts her glasses* Ah, excellent. I've been expecting you.
 [Self] *You step inside, taking in the warm atmosphere.*
-[Sofia:F] (excited) Mami! You're here! *runs over and wraps her arms around you*
-[Narrator:F] *The room falls silent. Moonlight streams through the windows.*
-[Marina:F] [thought]He's even more handsome than I imagined...[/thought] Please, come in.
-
-Output the script with one marker per line. No preamble, no explanation.";
+[Sofia:F] (excited) Mami! You're here!
+[Narrator:F] *The room falls silent.*
+[Marina:F] [thought]He's even more handsome than I imagined.[/thought] Please, come in.";
 
     private static bool HasBracketInstructions(string body)
     {
