@@ -77,8 +77,8 @@ public class MultiCharacterConfigTests
         var settings = LoadSettings();
 
         Assert.NotNull(settings.MultiCharacter);
-        Assert.Equal("deepseek/deepseek-v4-flash", settings.MultiCharacter.ModifierModel);
-        Assert.Equal(8000, settings.MultiCharacter.ModifierTimeoutMs);
+        Assert.Equal("meta-llama/llama-3.1-8b-instruct", settings.MultiCharacter.ModifierModel);
+        Assert.Equal(30000, settings.MultiCharacter.ModifierTimeoutMs);
         Assert.True(settings.MultiCharacter.AutoInjectModifiers);
         Assert.NotEmpty(settings.MultiCharacter.ModifierSystemPrompt);
         Assert.Equal("female-3", settings.MultiCharacter.ThoughtPersona);
@@ -86,10 +86,10 @@ public class MultiCharacterConfigTests
     }
 
     [Fact]
-    public void MultiCharacter_ModifierModelIsDeepSeek()
+    public void MultiCharacter_ModifierModelIsLlama()
     {
         var settings = LoadSettings();
-        Assert.Equal("deepseek/deepseek-v4-flash", settings.MultiCharacter.ModifierModel);
+        Assert.Equal("meta-llama/llama-3.1-8b-instruct", settings.MultiCharacter.ModifierModel);
     }
 
     [Fact]
@@ -100,10 +100,10 @@ public class MultiCharacterConfigTests
     }
 
     [Fact]
-    public void MultiCharacter_ModifierTimeoutMsIs8000()
+    public void MultiCharacter_ModifierTimeoutMsIs30000()
     {
         var settings = LoadSettings();
-        Assert.Equal(8000, settings.MultiCharacter.ModifierTimeoutMs);
+        Assert.Equal(30000, settings.MultiCharacter.ModifierTimeoutMs);
     }
 
     [Fact]

@@ -74,7 +74,7 @@ public class ParallelTtsPlayer
             tcss[i] = new TaskCompletionSource<(Stream? Stream, long SynthMs, int Seq)>();
         var synthesizeStarted = new long[segments.Count];
 
-        const int MaxParallelSynths = 1;
+        const int MaxParallelSynths = 3;
         using var throttle = new SemaphoreSlim(MaxParallelSynths, MaxParallelSynths);
 
         _ = Task.Run(async () =>

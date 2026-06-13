@@ -342,7 +342,8 @@ public class SttRunnerTests
             Stt = new SttSettings
             {
                 AutoSubmit = false,
-                CleanupSkip = false
+                CleanupSkip = false,
+                FeedbackBeep = false
             },
             TranscriptCleanup = new TranscriptCleanupSettings
             {

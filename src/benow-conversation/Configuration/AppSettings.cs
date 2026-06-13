@@ -82,13 +82,13 @@ public class PersonaUsageEntry
 /// <summary>Settings governing multi-character TTS modifier injection.</summary>
 public class MultiCharacterSettings
 {
-    public string ModifierModel { get; set; } = "deepseek/deepseek-v4-flash";
-    public int ModifierTimeoutMs { get; set; } = 8000;
+    public string ModifierModel { get; set; } = "meta-llama/llama-3.1-8b-instruct";
+    public int ModifierTimeoutMs { get; set; } = 30000;
     public bool AutoInjectModifiers { get; set; } = true;
     public string ModifierSystemPrompt { get; set; } = "";
     public bool AutoNormalize { get; set; } = true;
-    public string NormalizerModel { get; set; } = "deepseek/deepseek-v4-flash";
-    public int NormalizerTimeoutMs { get; set; } = 12000;
+    public string NormalizerModel { get; set; } = "meta-llama/llama-3.1-8b-instruct";
+    public int NormalizerTimeoutMs { get; set; } = 30000;
     public string NormalizerSystemPrompt { get; set; } = "";
     public string? ThoughtPersona { get; set; }
     public string? NarratorPersona { get; set; }
@@ -150,6 +150,7 @@ public class ProxySettings
     public bool LogBodies { get; set; }
     public bool ChunkedTts { get; set; } = true;
     public int MinParagraphLength { get; set; } = 20;
+    public int MaxChunkLength { get; set; } = 3000;
     public bool StreamTtsAudio { get; set; } = true;
     /// <summary>Auto-injects the multi-character bracket format prompt into the LLM system message. Eliminates need for CharacterNormalizer in most cases.</summary>
     public bool InjectCharacterFormat { get; set; } = true;

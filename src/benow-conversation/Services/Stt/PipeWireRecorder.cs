@@ -63,16 +63,17 @@ public class PipeWireRecorder : IAudioRecorder
             using var killProc = Process.Start(killPsi);
             killProc!.WaitForExit(3000);
 
-            Thread.Sleep(1000);
-
+            var deadline = DateTime.UtcNow.AddSeconds(1);
             foreach (var pid in pids)
             {
                 if (int.TryParse(pid, out var pidInt))
                 {
                     try
                     {
-                        using var check = Process.GetProcessById(pidInt);
-                        check.Kill(entireProcessTree: true);
+                        using var proc = Process.GetProcessById(pidInt);
+                        var remaining = (int)(deadline - DateTime.UtcNow).TotalMilliseconds;
+                        if (remaining > 0 && !proc.WaitForExit(remaining))
+                            proc.Kill(entireProcessTree: true);
                     }
                     catch { }
                 }

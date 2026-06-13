@@ -319,7 +319,7 @@ public class ProxyService : IProxyService
 
         var chunkedTts = _settings.Proxy.ChunkedTts;
         if (chunkedTts)
-            splitter = new ParagraphSplitter(_settings.Proxy.MinParagraphLength);
+            splitter = new ParagraphSplitter(_settings.Proxy.MinParagraphLength, _settings.Proxy.MaxChunkLength);
 
         while (!ct.IsCancellationRequested)
         {
@@ -556,7 +556,7 @@ public class ProxyService : IProxyService
     {
         if (_settings.Proxy.ChunkedTts)
         {
-            var splitter = new ParagraphSplitter(_settings.Proxy.MinParagraphLength);
+            var splitter = new ParagraphSplitter(_settings.Proxy.MinParagraphLength, _settings.Proxy.MaxChunkLength);
             splitter.Append(text);
             var remaining = splitter.Flush();
             while (splitter.TryDequeue(out var para))

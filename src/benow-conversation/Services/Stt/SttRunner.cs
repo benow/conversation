@@ -40,20 +40,30 @@ public class SttRunner : ISttRunner
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("[STT] Pipeline starting...");
-        _logger.LogInformation("[STT] Plugins loaded — recorder={Recorder} (available={RecAvail}), transcriber=loaded, transformer=loaded, clipboard={Clipboard} (available={ClipAvail}), keyboard={Keyboard} (available={KbAvail}), trigger=loaded (available={TrigAvail})",
-            _settings.Stt.Recorder, _recorder.IsAvailable,
-            _settings.Stt.Clipboard, _clipboard.IsAvailable,
-            _settings.Stt.Keyboard, _keyboard.IsAvailable,
-            _trigger.IsAvailable);
 
-        if (!_recorder.IsAvailable)
+        var recAvailTask = Task.Run(() => _recorder.IsAvailable);
+        var clipAvailTask = Task.Run(() => _clipboard.IsAvailable);
+        var kbAvailTask = Task.Run(() => _keyboard.IsAvailable);
+        var trigAvail = _trigger.IsAvailable;
+
+        var recAvail = await recAvailTask;
+        var clipAvail = await clipAvailTask;
+        var kbAvail = await kbAvailTask;
+
+        _logger.LogInformation("[STT] Plugins loaded — recorder={Recorder} (available={RecAvail}), transcriber=loaded, transformer=loaded, clipboard={Clipboard} (available={ClipAvail}), keyboard={Keyboard} (available={KbAvail}), trigger=loaded (available={TrigAvail})",
+            _settings.Stt.Recorder, recAvail,
+            _settings.Stt.Clipboard, clipAvail,
+            _settings.Stt.Keyboard, kbAvail,
+            trigAvail);
+
+        if (!recAvail)
         {
             _logger.LogError("[STT] Recorder '{Recorder}' is not available — cannot start", _settings.Stt.Recorder);
             Console.WriteLine("[STT] Error: audio recorder not available. Install required system tools.");
             return;
         }
 
-        if (!_trigger.IsAvailable)
+        if (!trigAvail)
         {
             _logger.LogError("[STT] Trigger is not available — cannot start");
             Console.WriteLine("[STT] Error: recording trigger not available.");
@@ -61,6 +71,10 @@ public class SttRunner : ISttRunner
         }
 
         _logger.LogInformation("[STT] Ready. Waiting for trigger to start recording...");
+
+        if (_settings.Stt.FeedbackBeep)
+            await PlayBeepAsync("beep_ready", cancellationToken);
+
         var cycleCount = 0;
 
         while (!cancellationToken.IsCancellationRequested)
@@ -85,10 +99,7 @@ public class SttRunner : ISttRunner
                 using var recCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
                 if (_settings.Stt.FeedbackBeep)
-                {
-                    await PlayBeepAsync(880, 0.15, CancellationToken.None);
-                    await Task.Delay(80, CancellationToken.None);
-                }
+                    await PlayBeepAsync("beep_start", CancellationToken.None);
 
                 var recordingTask = _recorder.RecordToFileAsync(tempFile, recCts.Token);
 
@@ -97,7 +108,7 @@ public class SttRunner : ISttRunner
                 recCts.Cancel();
 
                 if (_settings.Stt.FeedbackBeep)
-                    await PlayBeepAsync(440, 0.2, cancellationToken);
+                    await PlayBeepAsync("beep_stop", cancellationToken);
 
                 recordedFile = await recordingTask;
                 _logger.LogInformation("[STT] Cycle {Cycle}: recording saved ({Ms}ms, {Size} bytes)", cycleCount, sw.ElapsedMilliseconds, new FileInfo(recordedFile).Length);
@@ -199,29 +210,27 @@ public class SttRunner : ISttRunner
         _logger.LogInformation("[STT] Pipeline stopped after {Cycles} cycle(s)", cycleCount);
     }
 
-    private async Task PlayBeepAsync(int frequencyHz, double durationSec, CancellationToken ct)
+    private async Task PlayBeepAsync(string name, CancellationToken ct)
     {
         try
         {
-            var beepFile = Path.Combine(Path.GetTempPath(), $"stt_beep_{frequencyHz}.mp3");
+            var beepFile = Path.Combine(Path.GetTempPath(), $"stt_{name}.wav");
 
             if (!File.Exists(beepFile))
             {
-                _logger.LogInformation("[STT] Generating beep file {Hz}Hz", frequencyHz);
-                var genArgs = $"-y -f lavfi -i \"sine=frequency={frequencyHz}:duration={durationSec}\" -ac 1 -ar 16000 -acodec libmp3lame -b:a 32k \"{beepFile}\"";
-                var genPsi = new ProcessStartInfo
+                var resource = $"benow_conversation.Resources.{name}.wav";
+                using var stream = typeof(SttRunner).Assembly.GetManifestResourceStream(resource);
+                if (stream == null)
                 {
-                    FileName = _settings.Stt.FfmpegPath,
-                    Arguments = genArgs,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                using var genProc = Process.Start(genPsi);
-                await genProc!.WaitForExitAsync(ct);
+                    _logger.LogWarning("[STT] Beep resource {Resource} not found", resource);
+                    return;
+                }
+                using var outFile = File.Create(beepFile);
+                await stream.CopyToAsync(outFile, ct);
+                _logger.LogDebug("[STT] Extracted beep resource {Resource} → {File}", resource, beepFile);
             }
 
+            _logger.LogInformation("[STT] Playing beep: {Name}", name);
             var playArgs = $"-nodisp -autoexit -volume 80 \"{beepFile}\"";
             var playPsi = new ProcessStartInfo
             {
@@ -232,10 +241,9 @@ public class SttRunner : ISttRunner
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            _logger.LogInformation("[STT] Playing beep: {Hz}Hz {Duration}s", frequencyHz, durationSec);
             using var playProc = Process.Start(playPsi);
             await playProc!.WaitForExitAsync(ct);
-            _logger.LogInformation("[STT] Beep finished: {Hz}Hz (exit {ExitCode})", frequencyHz, playProc.ExitCode);
+            _logger.LogInformation("[STT] Beep finished: {Name} (exit {ExitCode})", name, playProc.ExitCode);
         }
         catch (Exception ex)
         {

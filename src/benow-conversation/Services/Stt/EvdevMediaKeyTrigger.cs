@@ -34,6 +34,7 @@ public partial class EvdevMediaKeyTrigger : IRecordingTrigger, IDisposable
     });
 
     private readonly List<int> _fds = [];
+    private readonly object _fdsLock = new();
     private readonly List<Task> _readerTasks = [];
     private readonly CancellationTokenSource _readCts = new();
     private long _lastTriggerTicks;
@@ -136,7 +137,7 @@ public partial class EvdevMediaKeyTrigger : IRecordingTrigger, IDisposable
 
             _fds.Add(fd);
             _logger.LogInformation("[Trigger] Monitoring: {Device} ({Name})", devicePath, deviceName);
-            StartDeviceReader(fd, devicePath);
+            StartDeviceReader(fd, devicePath, deviceName);
             monitorCount++;
         }
 
@@ -206,114 +207,195 @@ public partial class EvdevMediaKeyTrigger : IRecordingTrigger, IDisposable
             .ToList();
     }
 
-    private void StartDeviceReader(int fd, string devicePath)
+    private void StartDeviceReader(int fd, string devicePath, string deviceName)
     {
         var task = Task.Run(() =>
         {
             var buffer = new byte[INPUT_EVENT_SIZE];
-            var pfd = new LinuxInterop.PollFd { fd = fd, events = LinuxInterop.POLLIN };
-            var pollFds = new[] { pfd };
+            var retryDelay = 1000;
+            var fdsTrackedFd = fd;
+            var currentPath = devicePath;
 
-            _logger.LogDebug("[Trigger] Reader started for {Device} (fd={Fd})", devicePath, fd);
+            _logger.LogDebug("[Trigger] Reader started for {Device} (fd={Fd})", currentPath, fd);
 
             while (!_readCts.Token.IsCancellationRequested)
             {
-                try
+                var pfd = new LinuxInterop.PollFd { fd = fd, events = LinuxInterop.POLLIN };
+                var pollFds = new[] { pfd };
+                var shouldReconnect = false;
+
+                while (!_readCts.Token.IsCancellationRequested)
                 {
-                    var pollResult = LinuxInterop.poll(pollFds, new UIntPtr(1), 1000);
-
-                    if (pollResult < 0)
+                    try
                     {
-                        var errno = Marshal.GetLastWin32Error();
-                        if (errno == LinuxInterop.EINTR) continue;
-                        _logger.LogError("[Trigger] poll() error on {Device}: errno={Errno}", devicePath, errno);
-                        break;
-                    }
+                        pollFds[0].fd = fd;
+                        var pollResult = LinuxInterop.poll(pollFds, new UIntPtr(1), 1000);
 
-                    if (pollResult == 0) continue;
-
-                    if ((pollFds[0].revents & (LinuxInterop.POLLERR | LinuxInterop.POLLHUP)) != 0)
-                    {
-                        _logger.LogWarning("[Trigger] Device {Device} disconnected (revents={Events})", devicePath, pollFds[0].revents);
-                        break;
-                    }
-
-                    if ((pollFds[0].revents & LinuxInterop.POLLIN) == 0) continue;
-
-                    var bytesRead = (int)LinuxInterop.read(fd, buffer, new IntPtr(INPUT_EVENT_SIZE));
-
-                    if (bytesRead < 0)
-                    {
-                        var errno = Marshal.GetLastWin32Error();
-                        if (errno == LinuxInterop.EINTR) continue;
-                        _logger.LogError("[Trigger] read() error on {Device}: errno={Errno}", devicePath, errno);
-                        break;
-                    }
-
-                    if (bytesRead == 0)
-                    {
-                        _logger.LogWarning("[Trigger] EOF on {Device} — device disconnected?", devicePath);
-                        break;
-                    }
-
-                    if (bytesRead < INPUT_EVENT_SIZE)
-                    {
-                        _logger.LogDebug("[Trigger] Partial read ({Read}/{Expected}) on {Device}", bytesRead, INPUT_EVENT_SIZE, devicePath);
-                        continue;
-                    }
-
-                    var type = BitConverter.ToUInt16(buffer, 16);
-                    var code = BitConverter.ToUInt16(buffer, 18);
-                    var value = BitConverter.ToInt32(buffer, 20);
-
-                    if (type == EV_KEY)
-                    {
-                        var logged = Interlocked.Increment(ref _totalKeyEventsLogged);
-                        if (logged <= 20)
+                        if (pollResult < 0)
                         {
-                            _logger.LogInformation("[Trigger] KEY event on {Device}: code={Code} ({Name}), value={Value} (press=1, release=0, repeat=2)",
-                                devicePath, code, LinuxInterop.GetKeyCodeName(code), value);
+                            var errno = Marshal.GetLastWin32Error();
+                            if (errno == LinuxInterop.EINTR) continue;
+                            _logger.LogError("[Trigger] poll() error on {Device}: errno={Errno}", currentPath, errno);
+                            shouldReconnect = true;
+                            break;
                         }
-                        else if (logged == 21)
+
+                        if (pollResult == 0) continue;
+
+                        if ((pollFds[0].revents & (LinuxInterop.POLLERR | LinuxInterop.POLLHUP)) != 0)
                         {
-                            _logger.LogInformation("[Trigger] Suppressing further KEY event logs (logged {Count} events)", logged);
+                            _logger.LogWarning("[Trigger] Device {Device} disconnected (revents={Events})", currentPath, pollFds[0].revents);
+                            shouldReconnect = true;
+                            break;
                         }
-                    }
 
-                    if (type != EV_KEY || value != 1)
-                        continue;
+                        if ((pollFds[0].revents & LinuxInterop.POLLIN) == 0) continue;
 
-                    if (_triggerCodes.Contains(code))
-                    {
-                        var now = DateTime.UtcNow.Ticks;
-                        var last = Interlocked.Read(ref _lastTriggerTicks);
-                        var elapsed = TimeSpan.FromTicks(now - last).TotalMilliseconds;
+                        var bytesRead = (int)LinuxInterop.read(fd, buffer, new IntPtr(INPUT_EVENT_SIZE));
 
-                        if (elapsed < _debounceMs)
+                        if (bytesRead < 0)
                         {
-                            _logger.LogDebug("[Trigger] Debounced key={Code} ({Name}) on {Device} ({Elapsed:F0}ms < {Debounce}ms)",
-                                code, LinuxInterop.GetKeyCodeName(code), devicePath, elapsed, _debounceMs);
+                            var errno = Marshal.GetLastWin32Error();
+                            if (errno == LinuxInterop.EINTR) continue;
+                            _logger.LogError("[Trigger] read() error on {Device}: errno={Errno}", currentPath, errno);
+                            shouldReconnect = true;
+                            break;
+                        }
+
+                        if (bytesRead == 0)
+                        {
+                            _logger.LogWarning("[Trigger] EOF on {Device} — device disconnected?", currentPath);
+                            shouldReconnect = true;
+                            break;
+                        }
+
+                        if (bytesRead < INPUT_EVENT_SIZE)
+                        {
+                            _logger.LogDebug("[Trigger] Partial read ({Read}/{Expected}) on {Device}", bytesRead, INPUT_EVENT_SIZE, currentPath);
                             continue;
                         }
 
-                        Interlocked.Exchange(ref _lastTriggerTicks, now);
-                        _logger.LogInformation("[Trigger] TRIGGER DETECTED on {Device}: key={Code} ({Name})",
-                            devicePath, code, LinuxInterop.GetKeyCodeName(code));
-                        _channel.Writer.TryWrite(true);
+                        var type = BitConverter.ToUInt16(buffer, 16);
+                        var code = BitConverter.ToUInt16(buffer, 18);
+                        var value = BitConverter.ToInt32(buffer, 20);
+
+                        if (type == EV_KEY)
+                        {
+                            var logged = Interlocked.Increment(ref _totalKeyEventsLogged);
+                            if (logged <= 20)
+                            {
+                                _logger.LogInformation("[Trigger] KEY event on {Device}: code={Code} ({Name}), value={Value} (press=1, release=0, repeat=2)",
+                                    currentPath, code, LinuxInterop.GetKeyCodeName(code), value);
+                            }
+                            else if (logged == 21)
+                            {
+                                _logger.LogInformation("[Trigger] Suppressing further KEY event logs (logged {Count} events)", logged);
+                            }
+                        }
+
+                        if (type != EV_KEY || value != 1)
+                            continue;
+
+                        if (_triggerCodes.Contains(code))
+                        {
+                            var now = DateTime.UtcNow.Ticks;
+                            var last = Interlocked.Read(ref _lastTriggerTicks);
+                            var elapsed = TimeSpan.FromTicks(now - last).TotalMilliseconds;
+
+                            if (elapsed < _debounceMs)
+                            {
+                                _logger.LogDebug("[Trigger] Debounced key={Code} ({Name}) on {Device} ({Elapsed:F0}ms < {Debounce}ms)",
+                                    code, LinuxInterop.GetKeyCodeName(code), currentPath, elapsed, _debounceMs);
+                                continue;
+                            }
+
+                            Interlocked.Exchange(ref _lastTriggerTicks, now);
+                            _logger.LogInformation("[Trigger] TRIGGER DETECTED on {Device}: key={Code} ({Name})",
+                                currentPath, code, LinuxInterop.GetKeyCodeName(code));
+                            _channel.Writer.TryWrite(true);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        shouldReconnect = false;
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "[Trigger] Error reading from {Device}: {Error}", currentPath, ex.Message);
+                        shouldReconnect = true;
+                        break;
                     }
                 }
-                catch (OperationCanceledException)
-                {
+
+                if (!shouldReconnect || _readCts.Token.IsCancellationRequested)
                     break;
-                }
-                catch (Exception ex)
+
+                try { LinuxInterop.close(fd); } catch { }
+
+                _logger.LogInformation("[Trigger] Reconnecting to {Device} ({Name}) in {Delay}ms...", currentPath, deviceName, retryDelay);
+                try { Task.Delay(retryDelay, _readCts.Token).Wait(_readCts.Token); } catch { break; }
+
+                fd = LinuxInterop.open(currentPath, LinuxInterop.O_RDONLY);
+                if (fd < 0)
                 {
-                    _logger.LogError(ex, "[Trigger] Error reading from {Device}: {Error}", devicePath, ex.Message);
-                    break;
+                    var errno = Marshal.GetLastWin32Error();
+                    _logger.LogWarning("[Trigger] Reconnect failed for {Device} ({Name}): errno={Errno} — retrying", currentPath, deviceName, errno);
+
+                    if (errno == LinuxInterop.ENOENT && deviceName != "unknown")
+                    {
+                        var devices = LinuxInterop.ParseProcBusInputDevices();
+                        var cleanName = deviceName.Replace(" [BT]", "");
+                        var matches = devices
+                            .Where(kvp => cleanName.Contains(kvp.Value.Replace(" [BT]", ""), StringComparison.OrdinalIgnoreCase)
+                                       || kvp.Value.Replace(" [BT]", "").Contains(cleanName, StringComparison.OrdinalIgnoreCase))
+                            .Select(kvp => kvp.Key)
+                            .ToList();
+
+                        if (matches.Count > 0)
+                        {
+                            var anyOpened = false;
+                            foreach (var candidate in matches)
+                            {
+                                if (candidate == currentPath) continue;
+                                var testFd = LinuxInterop.open(candidate, LinuxInterop.O_RDONLY);
+                                if (testFd >= 0)
+                                {
+                                    LinuxInterop.close(testFd);
+                                    _logger.LogInformation("[Trigger] Device path changed: {OldPath} → {NewPath}", currentPath, candidate);
+                                    currentPath = candidate;
+                                    anyOpened = true;
+                                    break;
+                                }
+                            }
+                            if (!anyOpened)
+                                _logger.LogDebug("[Trigger] Name-matched candidates [{Candidates}] but none could be opened", string.Join(", ", matches));
+                        }
+                        else
+                        {
+                            _logger.LogWarning("[Trigger] Device '{Name}' not found in /proc/bus/input/devices ({Count} devices total)", deviceName, devices.Count);
+                        }
+                    }
+
+                    retryDelay = Math.Min(retryDelay * 2, 15000);
+                    _logger.LogDebug("[Trigger] Reconnect backoff: next attempt in {Delay}ms", retryDelay);
+                    continue;
                 }
+
+                _logger.LogInformation("[Trigger] Reconnected to {Device} ({Name}) (new fd={Fd})", currentPath, deviceName, fd);
+                lock (_fdsLock)
+                {
+                    var idx = _fds.IndexOf(fdsTrackedFd);
+                    if (idx >= 0)
+                    {
+                        _fds[idx] = fd;
+                        fdsTrackedFd = fd;
+                    }
+                }
+                retryDelay = 1000;
             }
 
-            _logger.LogDebug("[Trigger] Reader stopped for {Device}", devicePath);
+            _logger.LogDebug("[Trigger] Reader stopped for {Device}", currentPath);
         }, _readCts.Token);
 
         _readerTasks.Add(task);
@@ -343,11 +425,14 @@ public partial class EvdevMediaKeyTrigger : IRecordingTrigger, IDisposable
     {
         _readCts.Cancel();
         try { Task.WaitAll(_readerTasks.ToArray(), TimeSpan.FromSeconds(2)); } catch { }
-        foreach (var fd in _fds)
+        lock (_fdsLock)
         {
-            try { LinuxInterop.close(fd); } catch { }
+            foreach (var fd in _fds)
+            {
+                try { LinuxInterop.close(fd); } catch { }
+            }
+            _fds.Clear();
         }
-        _fds.Clear();
         _readCts.Dispose();
     }
 }

@@ -6,13 +6,17 @@ public class ParagraphSplitter
 {
     private readonly StringBuilder _buffer = new();
     private readonly int _minLength;
+    private readonly int _maxChunkLength;
     private readonly Queue<string> _completed = new();
     private bool _firstSentenceEmitted;
     private bool _inCodeFence;
 
-    public ParagraphSplitter(int minLength = 20)
+    public const int DefaultMaxChunkLength = 3000;
+
+    public ParagraphSplitter(int minLength = 20, int maxChunkLength = DefaultMaxChunkLength)
     {
         _minLength = minLength;
+        _maxChunkLength = maxChunkLength;
     }
 
     public void Append(string fragment)
@@ -48,13 +52,14 @@ public class ParagraphSplitter
             var text = _buffer.ToString();
             if (text.Length == 0) break;
 
-            // Track code fences
-            int fenceIdx;
-            while ((fenceIdx = text.IndexOf("```", StringComparison.Ordinal)) >= 0)
+            // Code fence handling: only strip ``` at buffer start to avoid losing text before fences
+            if (text.StartsWith("```"))
             {
                 _inCodeFence = !_inCodeFence;
-                _buffer.Remove(0, fenceIdx + 3);
+                _buffer.Remove(0, 3);
                 text = _buffer.ToString();
+                if (_inCodeFence) break;
+                continue;
             }
 
             if (_inCodeFence) break;
@@ -106,13 +111,39 @@ public class ParagraphSplitter
                 }
             }
 
+            // Max chunk enforcement: force-split long text to avoid TTS API character limits
+            if (text.Length > _maxChunkLength)
+            {
+                var cutPoint = FindSentenceEnd(text, _maxChunkLength);
+                if (cutPoint < _minLength / 2)
+                {
+                    cutPoint = FindLastSpace(text, _maxChunkLength);
+                    if (cutPoint < _minLength / 2)
+                        cutPoint = _maxChunkLength;
+                }
+                var chunk = text[..cutPoint].Trim();
+                _buffer.Remove(0, cutPoint);
+                if (!string.IsNullOrWhiteSpace(chunk) && chunk.Length >= _minLength / 2)
+                {
+                    _completed.Enqueue(chunk);
+                    DequeuedChunks.Add(chunk);
+                }
+                continue;
+            }
+
             break;
         }
     }
 
     private static int FindSentenceEnd(string text)
     {
-        for (var i = 0; i < text.Length - 1; i++)
+        return FindSentenceEnd(text, text.Length);
+    }
+
+    private static int FindSentenceEnd(string text, int maxPos)
+    {
+        var limit = Math.Min(text.Length - 1, maxPos);
+        for (var i = 0; i < limit; i++)
         {
             if (text[i] == '.' || text[i] == '!' || text[i] == '?')
             {
@@ -120,10 +151,20 @@ public class ParagraphSplitter
                 if (next == ' ' || next == '\n' || next == '\r' || next == '\t')
                 {
                     var candidate = text[..(i + 1)].Trim();
-                    if (candidate.Length >= 20) // sentence must be reasonable
+                    if (candidate.Length >= 20)
                         return i + 1;
                 }
             }
+        }
+        return -1;
+    }
+
+    private static int FindLastSpace(string text, int maxPos)
+    {
+        for (var i = Math.Min(maxPos - 1, text.Length - 1); i >= 0; i--)
+        {
+            if (text[i] == ' ' || text[i] == '\n')
+                return i + 1;
         }
         return -1;
     }

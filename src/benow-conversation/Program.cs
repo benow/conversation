@@ -1,4 +1,5 @@
-﻿using System.Text.Json;
+﻿using System.Diagnostics;
+using System.Text.Json;
 using benow_conversation.Configuration;
 using benow_conversation.Models;
 using benow_conversation.Services;
@@ -23,7 +24,7 @@ var logPath = Path.Combine(logDir, "benow-conversation.log");
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
-    .WriteTo.Console(outputTemplate: "[{Level:u3}] {Message:lj}{NewLine}{Exception}")
+    .WriteTo.Console(outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
     .WriteTo.File(logPath, outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
@@ -169,6 +170,8 @@ var sttMode = false;
 var sttSetup = false;
 var noCleanup = false;
 string? cleanupModelOverride = null;
+string? extractVoicePath = null;
+string? extractVoiceName = null;
 
 for (var i = 0; i < cliArgs.Length; i++)
 {
@@ -278,6 +281,10 @@ for (var i = 0; i < cliArgs.Length; i++)
         noCleanup = true;
     else if (cliArgs[i] == "--cleanup-model" && i + 1 < cliArgs.Length)
         cleanupModelOverride = cliArgs[++i];
+    else if (cliArgs[i] == "--extract-voice" && i + 1 < cliArgs.Length)
+        extractVoicePath = cliArgs[++i];
+    else if (cliArgs[i] == "--voice-name" && i + 1 < cliArgs.Length)
+        extractVoiceName = cliArgs[++i];
     else if (!cliArgs[i].StartsWith("-"))
     {
         var resolvedPath = Path.GetFullPath(cliArgs[i], projectRoot);
@@ -298,6 +305,65 @@ for (var i = 0; i < cliArgs.Length; i++)
             Log.Information("Using direct text input ({Length} chars)", text.Length);
         }
     }
+}
+
+if (extractVoicePath != null)
+{
+    var repoRoot = Path.GetFullPath(Path.Combine(projectRoot, "..", ".."));
+    var inputPath = Path.GetFullPath(extractVoicePath, projectRoot);
+    if (!File.Exists(inputPath))
+    {
+        Log.Error("Video file not found: '{Path}'. Project root: '{ProjectRoot}'.", extractVoicePath, projectRoot);
+        await Log.CloseAndFlushAsync();
+        return;
+    }
+
+    var voiceName = extractVoiceName ?? Path.GetFileNameWithoutExtension(inputPath);
+    var scriptPath = Path.Combine(repoRoot, "scripts", "extract-voice.py");
+    var venvPython = Path.Combine(repoRoot, ".venv-tts", "bin", "python");
+
+    if (!File.Exists(scriptPath))
+    {
+        Log.Error("Extract-voice script not found: {Path}", scriptPath);
+        await Log.CloseAndFlushAsync();
+        return;
+    }
+
+    Log.Information("Extracting voice sample from: {Input}", inputPath);
+    Log.Information("Output name: {Name}", voiceName);
+
+    var psi = new ProcessStartInfo
+    {
+        FileName = venvPython,
+        Arguments = $"\"{scriptPath}\" --input \"{inputPath}\" --name \"{voiceName}\"",
+        UseShellExecute = false,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        CreateNoWindow = true
+    };
+
+    using var process = Process.Start(psi)!;
+    var stdout = await process.StandardOutput.ReadToEndAsync();
+    var stderr = await process.StandardError.ReadToEndAsync();
+    await process.WaitForExitAsync();
+
+    if (!string.IsNullOrEmpty(stdout))
+        Log.Information("{Output}", stdout.TrimEnd());
+    if (!string.IsNullOrEmpty(stderr))
+        Log.Information("{Output}", stderr.TrimEnd());
+
+    if (process.ExitCode != 0)
+    {
+        Log.Error("Voice extraction failed with exit code {Code}", process.ExitCode);
+        await Log.CloseAndFlushAsync();
+        return;
+    }
+
+    var outputFile = Path.Combine(repoRoot, "voices", $"{voiceName}.wav");
+    Log.Information("Voice sample saved: {Path}", outputFile);
+    Log.Information("Application ended");
+    await Log.CloseAndFlushAsync();
+    return;
 }
 
 try
@@ -1068,5 +1134,7 @@ static void PrintUsage(IServiceProvider services)
     Log.Information("  --stt --daemon                  STT + daemon mode (both run concurrently)");
     Log.Information("  --no-cleanup                    Skip transcript cleanup step");
     Log.Information("  --cleanup-model <model>         Override cleanup LLM model");
+    Log.Information("  --extract-voice <path>          Extract clean voice sample from video for cloning");
+    Log.Information("  --voice-name <name>             Name for extracted voice (used with --extract-voice)");
     Log.Information("  --help                          Show this help message");
 }

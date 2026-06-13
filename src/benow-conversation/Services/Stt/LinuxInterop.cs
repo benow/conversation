@@ -12,6 +12,7 @@ internal static class LinuxInterop
     internal const ushort BUS_BLUETOOTH = 0x05;
     internal const int EINTR = 4;
     internal const int EACCES = 13;
+    internal const int ENOENT = 2;
 
     [DllImport("libc", SetLastError = true)]
     internal static extern int open(string pathname, int flags);
@@ -52,23 +53,39 @@ internal static class LinuxInterop
         return KeyCodeNames.TryGetValue(code, out var name) ? name : $"UNKNOWN({code})";
     }
 
-    internal static Dictionary<string, string> ParseProcBusInputDevices()
+    internal sealed class InputDeviceInfo
     {
-        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        public string Path { get; }
+        public string Name { get; }
+        public string? HardwareId { get; }
+
+        public InputDeviceInfo(string path, string name, string? hardwareId)
+        {
+            Path = path;
+            Name = name;
+            HardwareId = hardwareId;
+        }
+    }
+
+    internal static List<InputDeviceInfo> ParseInputDevices()
+    {
+        var list = new List<InputDeviceInfo>();
         try
         {
             if (!File.Exists("/proc/bus/input/devices"))
-                return names;
+                return list;
 
             var lines = File.ReadAllLines("/proc/bus/input/devices");
             string? currentName = null;
             string? currentHandlers = null;
+            string? currentHardwareId = null;
             ushort? currentBus = null;
 
             foreach (var line in lines)
             {
                 if (line.StartsWith("I: Bus="))
                 {
+                    currentHardwareId = line[3..].Trim();
                     var busStr = line.Substring(7).Split()[0];
                     ushort.TryParse(busStr, System.Globalization.NumberStyles.HexNumber, null, out var bus);
                     currentBus = bus;
@@ -83,24 +100,34 @@ internal static class LinuxInterop
                 }
                 else if (string.IsNullOrEmpty(line))
                 {
-                    FlushDevice(currentHandlers, currentName, currentBus, names);
+                    FlushDevice(currentHandlers, currentName, currentBus, currentHardwareId, list);
                     currentName = null;
                     currentHandlers = null;
+                    currentHardwareId = null;
                     currentBus = null;
                 }
             }
 
-            FlushDevice(currentHandlers, currentName, currentBus, names);
+            FlushDevice(currentHandlers, currentName, currentBus, currentHardwareId, list);
         }
         catch { }
 
-        return names;
+        return list;
     }
 
-    private static void FlushDevice(string? handlers, string? name, ushort? bus, Dictionary<string, string> names)
+    internal static Dictionary<string, string> ParseProcBusInputDevices()
+    {
+        return ParseInputDevices().ToDictionary(d => d.Path, d => d.Name, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static void FlushDevice(string? handlers, string? name, ushort? bus, string? hardwareId, List<InputDeviceInfo> list)
     {
         if (handlers == null || name == null) return;
+        var displayName = name + (bus == BUS_BLUETOOTH ? " [BT]" : "");
         foreach (Match m in Regex.Matches(handlers, @"event(\d+)"))
-            names[$"/dev/input/event{m.Groups[1].Value}"] = name + (bus == BUS_BLUETOOTH ? " [BT]" : "");
+        {
+            var path = $"/dev/input/event{m.Groups[1].Value}";
+            list.Add(new InputDeviceInfo(path, displayName, hardwareId));
+        }
     }
 }

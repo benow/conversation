@@ -52,7 +52,8 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
         SingleWriter = false
     });
 
-    private readonly List<int> _fds = [];
+    private readonly Dictionary<string, int> _pathToFd = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _pathToFdLock = new();
     private readonly List<Task> _readerTasks = [];
     private readonly CancellationTokenSource _readCts = new();
     private long _lastTriggerTicks;
@@ -104,6 +105,8 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
         return (modifiers, triggerKey);
     }
 
+    // ─── Initialization ────────────────────────────────────────────────
+
     private bool Initialize()
     {
         if (!Directory.Exists("/dev/input"))
@@ -112,8 +115,7 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
             return false;
         }
 
-        var devices = LinuxInterop.ParseProcBusInputDevices();
-        var keyboards = devices
+        var keyboards = LinuxInterop.ParseProcBusInputDevices()
             .Where(kvp => IsKeyboard(kvp.Value))
             .ToList();
 
@@ -129,12 +131,12 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
             var fd = LinuxInterop.open(path, LinuxInterop.O_RDONLY);
             if (fd < 0)
             {
-                var errno = Marshal.GetLastWin32Error();
-                _logger.LogDebug("[Trigger] Cannot open {Device} ({Name}): errno={Errno}", path, name, errno);
+                _logger.LogDebug("[Trigger] Cannot open {Device} ({Name}): errno={Errno}", path, name,
+                    Marshal.GetLastWin32Error());
                 continue;
             }
 
-            _fds.Add(fd);
+            lock (_pathToFdLock) _pathToFd[path] = fd;
             _logger.LogInformation("[Trigger] Monitoring: {Device} ({Name})", path, name);
             StartReader(fd, path);
             monitorCount++;
@@ -146,43 +148,38 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
             return false;
         }
 
+        StartHeartbeat();
         return true;
     }
 
-    private static bool IsKeyboard(string deviceName)
-    {
-        if (!deviceName.Contains("keyboard", StringComparison.OrdinalIgnoreCase) &&
-            !deviceName.Contains("Keyboard", StringComparison.OrdinalIgnoreCase))
-            return false;
+    // ─── Reader (simple poll loop, no reconnect) ───────────────────────
 
-        if (deviceName.Contains("ydotoold", StringComparison.OrdinalIgnoreCase) ||
-            deviceName.Contains("Controller", StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        return true;
-    }
-
-    private void StartReader(int fd, string devicePath)
+    private void StartReader(int fd, string path)
     {
         var task = Task.Run(() =>
         {
             var buffer = new byte[INPUT_EVENT_SIZE];
-            var pfd = new LinuxInterop.PollFd { fd = fd, events = LinuxInterop.POLLIN };
-            var pollFds = new[] { pfd };
 
             while (!_readCts.Token.IsCancellationRequested)
             {
                 try
                 {
-                    var pollResult = LinuxInterop.poll(pollFds, new UIntPtr(1), 1000);
-                    if (pollResult < 0)
+                    var pfd = new LinuxInterop.PollFd { fd = fd, events = LinuxInterop.POLLIN };
+                    var pollFds = new[] { pfd };
+                    var result = LinuxInterop.poll(pollFds, new UIntPtr(1), 1000);
+                    if (result < 0)
                     {
                         var errno = Marshal.GetLastWin32Error();
                         if (errno == LinuxInterop.EINTR) continue;
+                        _logger.LogDebug("[Trigger] poll() error on {Path}: errno={Errno}", path, errno);
                         break;
                     }
-                    if (pollResult == 0) continue;
-                    if ((pollFds[0].revents & (LinuxInterop.POLLERR | LinuxInterop.POLLHUP)) != 0) break;
+                    if (result == 0) continue;
+                    if ((pollFds[0].revents & (LinuxInterop.POLLERR | LinuxInterop.POLLHUP)) != 0)
+                    {
+                        _logger.LogDebug("[Trigger] {Path} disconnected", path);
+                        break;
+                    }
                     if ((pollFds[0].revents & LinuxInterop.POLLIN) == 0) continue;
 
                     var bytesRead = (int)LinuxInterop.read(fd, buffer, new IntPtr(INPUT_EVENT_SIZE));
@@ -201,25 +198,100 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
                         continue;
                     }
 
-                    if (code == _triggerKeyCode && value == 1 && _modifierCodes.All(m => _heldModifiers.Contains(m)))
+                    if (code == _triggerKeyCode && value == 1 &&
+                        _modifierCodes.All(m => _heldModifiers.Contains(m)))
                     {
                         var now = DateTime.UtcNow.Ticks;
                         var last = Interlocked.Read(ref _lastTriggerTicks);
-                        var elapsed = TimeSpan.FromTicks(now - last).TotalMilliseconds;
-
-                        if (elapsed < _debounceMs) continue;
+                        if (TimeSpan.FromTicks(now - last).TotalMilliseconds < _debounceMs) continue;
 
                         Interlocked.Exchange(ref _lastTriggerTicks, now);
-                        _logger.LogInformation("[Trigger] Hotkey detected");
+                        _logger.LogInformation("[Trigger] Hotkey detected on {Path}", path);
                         _channel.Writer.TryWrite(true);
                     }
                 }
                 catch (OperationCanceledException) { break; }
-                catch { break; }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "[Trigger] Reader error on {Path}: {Message}", path, ex.Message);
+                    break;
+                }
             }
+
+            _logger.LogDebug("[Trigger] Reader stopped for {Path}", path);
         }, _readCts.Token);
 
         _readerTasks.Add(task);
+    }
+
+    // ─── Heartbeat (rescans and diffs keyboard devices) ────────────────
+
+    private void StartHeartbeat()
+    {
+        _readerTasks.Add(Task.Run(async () =>
+        {
+            while (!_readCts.Token.IsCancellationRequested)
+            {
+                try { SyncKeyboardDevices(); }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "[Trigger] Heartbeat error: {Message}", ex.Message);
+                }
+
+                try { await Task.Delay(2000, _readCts.Token); }
+                catch { break; }
+            }
+
+            _logger.LogDebug("[Trigger] Heartbeat stopped");
+        }, _readCts.Token));
+    }
+
+    private void SyncKeyboardDevices()
+    {
+        var currentKeyboards = LinuxInterop.ParseProcBusInputDevices()
+            .Where(kvp => IsKeyboard(kvp.Value))
+            .Select(kvp => kvp.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        lock (_pathToFdLock)
+        {
+            // Close FDs for keyboards that no longer exist
+            var gone = _pathToFd.Keys.Except(currentKeyboards, StringComparer.OrdinalIgnoreCase).ToList();
+            foreach (var path in gone)
+            {
+                try { LinuxInterop.close(_pathToFd[path]); } catch { }
+                _pathToFd.Remove(path);
+                _logger.LogDebug("[Trigger] Stopped monitoring {Path} (device gone)", path);
+            }
+
+            // Open FDs and start readers for new keyboards
+            foreach (var path in currentKeyboards)
+            {
+                if (_pathToFd.ContainsKey(path)) continue;
+                var fd = LinuxInterop.open(path, LinuxInterop.O_RDONLY);
+                if (fd >= 0)
+                {
+                    _pathToFd[path] = fd;
+                    _logger.LogInformation("[Trigger] Started monitoring new keyboard {Path}", path);
+                    StartReader(fd, path);
+                }
+            }
+        }
+    }
+
+    // ─── Helpers ───────────────────────────────────────────────────────
+
+    private static bool IsKeyboard(string deviceName)
+    {
+        if (!deviceName.Contains("keyboard", StringComparison.OrdinalIgnoreCase) &&
+            !deviceName.Contains("Keyboard", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (deviceName.Contains("ydotoold", StringComparison.OrdinalIgnoreCase) ||
+            deviceName.Contains("Controller", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return true;
     }
 
     public async Task WaitForTriggerAsync(CancellationToken ct)
@@ -236,11 +308,12 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
     {
         _readCts.Cancel();
         try { Task.WaitAll(_readerTasks.ToArray(), TimeSpan.FromSeconds(2)); } catch { }
-        foreach (var fd in _fds)
+        lock (_pathToFdLock)
         {
-            try { LinuxInterop.close(fd); } catch { }
+            foreach (var fd in _pathToFd.Values)
+                try { LinuxInterop.close(fd); } catch { }
+            _pathToFd.Clear();
         }
-        _fds.Clear();
         _readCts.Dispose();
     }
 }
