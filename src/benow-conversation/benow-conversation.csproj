@@ -16,6 +16,7 @@
     <EmbeddedResource Include="Resources\beep_start.wav" />
     <EmbeddedResource Include="Resources\beep_stop.wav" />
     <EmbeddedResource Include="Resources\beep_ready.wav" />
+    <EmbeddedResource Include="Resources\beep_clipboard.wav" />
   </ItemGroup>
 
   <ItemGroup>

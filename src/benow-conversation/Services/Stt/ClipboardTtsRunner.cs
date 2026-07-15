@@ -78,8 +78,8 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
                     continue;
                 }
 
-                // Confirmation beep
-                await PlayBeepAsync("beep_ready");
+                // Confirmation beep (distinct from STT beeps)
+                await PlayBeepAsync("beep_clipboard");
 
                 // Read clipboard
                 var text = await _clipboard.ReadAsync(cancellationToken);
@@ -185,8 +185,10 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
         Task<string?>? nextSynthTask = null;
         string? nextChunkText = null;
 
-        // Peek ahead: prepare first chunk
-        var firstChunk = ExtractChunk(remainingText, chunkSize, ref position);
+        // First chunk: eager first sentence for fast time-to-first-audio
+        var firstChunk = ExtractFirstSentence(remainingText, ref position);
+        // If no clear sentence boundary found, fall back to small chunk
+        firstChunk ??= ExtractChunk(remainingText, Math.Min(300, chunkSize), ref position);
         if (firstChunk == null) return;
         var firstSw = Stopwatch.StartNew();
         var firstFile = await SynthesizeToFileAsync(firstChunk, persona, ++chunkIndex, ct);
@@ -252,6 +254,35 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
         }
 
         _logger.LogInformation("[ClipboardTts] Playback complete ({ChunkCount} chunks, final chunk size {Size})", chunkIndex, chunkSize);
+    }
+
+    /// <summary>
+    /// Extract just the first sentence for eager time-to-first-audio.
+    /// Returns null if no sentence boundary found within a reasonable length.
+    /// </summary>
+    private static string? ExtractFirstSentence(ReadOnlySpan<char> text, ref int position)
+    {
+        if (text.Length == 0) return null;
+
+        var limit = Math.Min(text.Length, 400); // don't scan too far
+        var span = text[..limit];
+
+        for (var i = 0; i < span.Length - 1; i++)
+        {
+            if (span[i] is '.' or '!' or '?' && span[i + 1] is ' ' or '\n' or '\r')
+            {
+                var sentence = span[..(i + 1)].ToString().Trim();
+                if (sentence.Length >= 10)
+                {
+                    position += i + 1;
+                    while (position < text.Length && char.IsWhiteSpace(text[position]))
+                        position++;
+                    return sentence;
+                }
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
