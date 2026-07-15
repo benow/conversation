@@ -151,48 +151,109 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
         var splitter = new ParagraphSplitter();
         splitter.Append(text);
 
-        var chunkIndex = 0;
+        // Collect all chunks up front
+        var chunks = new List<string>();
         while (splitter.TryDequeue(out var chunk))
+            chunks.Add(chunk!);
+        var remaining = splitter.Flush();
+        if (remaining != null)
+            chunks.Add(remaining);
+
+        if (chunks.Count == 0) return;
+
+        _logger.LogInformation("[ClipboardTts] {ChunkCount} chunks queued", chunks.Count);
+
+        // Synthesize + play with overlap: synthesize chunk N, then start chunk N+1 synthesis
+        // while chunk N plays. Only 1 concurrent Replicate request at a time.
+        string? nextFile = null;
+        Task<string?>? nextSynthTask = null;
+
+        for (var i = 0; i < chunks.Count; i++)
         {
             if (ct.IsCancellationRequested) break;
 
-            chunkIndex++;
-            _logger.LogInformation("[ClipboardTts] Chunk {Index}: {Length} chars", chunkIndex, chunk!.Length);
-            await SynthesizeAndPlayAsync(chunk, persona, chunkIndex, ct);
+            string currentFile;
+
+            if (i == 0)
+            {
+                // First chunk: synthesize immediately
+                currentFile = await SynthesizeToFileAsync(chunks[0], persona, 1, ct);
+            }
+            else
+            {
+                // Use the file synthesized while previous chunk was playing
+                currentFile = nextFile;
+                nextFile = null;
+            }
+
+            // While this chunk plays, start synthesizing the next one (if any)
+            var nextI = i + 1;
+            if (nextI < chunks.Count && currentFile != null)
+            {
+                var synthIndex = nextI + 1;
+                nextSynthTask = SynthesizeToFileAsync(chunks[nextI], persona, synthIndex, ct);
+            }
+            else
+            {
+                nextSynthTask = null;
+            }
+
+            // Play current chunk
+            if (currentFile != null && !ct.IsCancellationRequested)
+            {
+                _logger.LogInformation("[ClipboardTts] Playing chunk {Index}/{Total}", i + 1, chunks.Count);
+                try
+                {
+                    await _audioPlayer.PlayAsync(currentFile, cancellationToken: ct);
+                }
+                finally
+                {
+                    try { File.Delete(currentFile); } catch { }
+                }
+            }
+
+            // Wait for next chunk's synthesis to finish (should be done or nearly done by now)
+            if (nextSynthTask != null)
+            {
+                nextFile = await nextSynthTask;
+                nextSynthTask = null;
+            }
         }
 
-        // Flush remaining buffer
-        var remaining = splitter.Flush();
-        if (remaining != null && !ct.IsCancellationRequested)
+        // Clean up if cancelled mid-synthesis
+        if (nextSynthTask != null)
         {
-            chunkIndex++;
-            _logger.LogInformation("[ClipboardTts] Final chunk {Index}: {Length} chars", chunkIndex, remaining.Length);
-            await SynthesizeAndPlayAsync(remaining, persona, chunkIndex, ct);
+            var trailing = await nextSynthTask;
+            if (trailing != null) try { File.Delete(trailing); } catch { }
         }
 
-        _logger.LogInformation("[ClipboardTts] Playback complete ({ChunkCount} chunks)", chunkIndex);
+        _logger.LogInformation("[ClipboardTts] Playback complete ({ChunkCount} chunks)", chunks.Count);
     }
 
-    private async Task SynthesizeAndPlayAsync(string chunk, (VoicePersona Persona, string Key) persona, int index, CancellationToken ct)
+    private async Task<string?> SynthesizeToFileAsync(string chunk, (VoicePersona Persona, string Key) persona, int index, CancellationToken ct)
     {
-        await using var audioStream = await _ttsProvider.SynthesizeAsync(
-            chunk, persona.Key, persona.Persona.Voice, persona.Persona.OpenAiInstructions,
-            persona.Persona.Temperature, persona.Persona.Seed, ct);
-
-        var tempFile = Path.Combine(Path.GetTempPath(), $"cbtts_{Guid.NewGuid():N}.wav");
         try
         {
+            _logger.LogInformation("[ClipboardTts] Synthesizing chunk {Index} ({Length} chars)", index, chunk.Length);
+            await using var audioStream = await _ttsProvider.SynthesizeAsync(
+                chunk, persona.Key, persona.Persona.Voice, persona.Persona.OpenAiInstructions,
+                persona.Persona.Temperature, persona.Persona.Seed, ct);
+
+            var tempFile = Path.Combine(Path.GetTempPath(), $"cbtts_{Guid.NewGuid():N}.wav");
             using (var fileStream = File.Create(tempFile))
                 await audioStream.CopyToAsync(fileStream, ct);
 
-            _logger.LogInformation("[ClipboardTts] Chunk {Index}: playing {Bytes} bytes", index, new FileInfo(tempFile).Length);
-            await _audioPlayer.PlayAsync(tempFile, cancellationToken: ct);
-            _logger.LogInformation("[ClipboardTts] Chunk {Index}: playback finished", index);
+            _logger.LogInformation("[ClipboardTts] Chunk {Index}: synthesized ({Bytes} bytes)", index, new FileInfo(tempFile).Length);
+            return tempFile;
         }
-        finally
+        catch (OperationCanceledException)
         {
-            try { File.Delete(tempFile); }
-            catch (Exception ex) { _logger.LogDebug(ex, "[ClipboardTts] Failed to delete temp file {File}", tempFile); }
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[ClipboardTts] Chunk {Index}: synthesis failed: {Message}", index, ex.Message);
+            return null;
         }
     }
 
