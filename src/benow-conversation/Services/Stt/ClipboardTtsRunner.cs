@@ -148,87 +148,149 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
 
     private async Task PlayTextAsync(string text, (VoicePersona Persona, string Key) persona, CancellationToken ct)
     {
-        var maxChunk = _settings.ClipboardTts.MaxChunkLength;
-        var splitter = new ParagraphSplitter(maxChunkLength: maxChunk);
-        splitter.Append(text);
+        // Adaptive chunking: start with configured max, adjust based on observed synthesis speed.
+        // Target: synthesis time ≤ 80% of estimated playback time, so overlap covers the gap.
+        const double TargetSynthRatio = 0.8;
+        const int MinChunk = 200;
+        const int MaxChunk = 3000;
+        const double CharsPerSecond = 14.0; // rough TTS speech rate estimate
 
-        // Collect all chunks up front
-        var chunks = new List<string>();
-        while (splitter.TryDequeue(out var chunk))
-            chunks.Add(chunk!);
-        var remaining = splitter.Flush();
-        if (remaining != null)
-            chunks.Add(remaining);
+        var chunkSize = _settings.ClipboardTts.MaxChunkLength;
+        var position = 0;
+        var chunkIndex = 0;
+        var synthMsPerChar = 5.0; // initial guess: 5ms per char (will adapt)
+        var remainingText = text.AsSpan();
 
-        if (chunks.Count == 0) return;
-
-        _logger.LogInformation("[ClipboardTts] {ChunkCount} chunks queued (max {MaxChunk} chars each)", chunks.Count, maxChunk);
-
-        // Synthesize + play with overlap: synthesize chunk N, then start chunk N+1 synthesis
-        // while chunk N plays. Only 1 concurrent Replicate request at a time.
         string? nextFile = null;
         Task<string?>? nextSynthTask = null;
+        string? nextChunkText = null;
 
-        for (var i = 0; i < chunks.Count; i++)
+        // Peek ahead: prepare first chunk
+        var firstChunk = ExtractChunk(remainingText, chunkSize, ref position);
+        if (firstChunk == null) return;
+        var firstSw = Stopwatch.StartNew();
+        var firstFile = await SynthesizeToFileAsync(firstChunk, persona, ++chunkIndex, ct);
+        firstSw.Stop();
+        synthMsPerChar = firstChunk.Length > 0 ? firstSw.ElapsedMilliseconds / (double)firstChunk.Length : synthMsPerChar;
+        _logger.LogInformation("[ClipboardTts] Adaptive: initial synth {Ms}ms for {Len} chars ({Rate:F1}ms/char)",
+            firstSw.ElapsedMilliseconds, firstChunk.Length, synthMsPerChar);
+
+        // Start synthesizing chunk 2 while chunk 1 plays
+        remainingText = text.AsSpan(position);
+        nextChunkText = ExtractChunk(remainingText, chunkSize, ref position);
+        if (nextChunkText != null)
+            nextSynthTask = SynthesizeToFileAsync(nextChunkText, persona, ++chunkIndex, ct);
+        else
+            nextSynthTask = null;
+
+        // Play chunk 1
+        if (firstFile != null && !ct.IsCancellationRequested)
         {
-            if (ct.IsCancellationRequested) break;
+            _logger.LogInformation("[ClipboardTts] Playing chunk {Index}", chunkIndex - 1);
+            try { await _audioPlayer.PlayAsync(firstFile, cancellationToken: ct); }
+            finally { try { File.Delete(firstFile); } catch { } }
+        }
 
-            string currentFile;
-
-            if (i == 0)
-            {
-                // First chunk: synthesize immediately
-                currentFile = await SynthesizeToFileAsync(chunks[0], persona, 1, ct);
-            }
-            else
-            {
-                // Use the file synthesized while previous chunk was playing
-                currentFile = nextFile;
-                nextFile = null;
-            }
-
-            // While this chunk plays, start synthesizing the next one (if any)
-            var nextI = i + 1;
-            if (nextI < chunks.Count && currentFile != null)
-            {
-                var synthIndex = nextI + 1;
-                nextSynthTask = SynthesizeToFileAsync(chunks[nextI], persona, synthIndex, ct);
-            }
-            else
-            {
-                nextSynthTask = null;
-            }
-
-            // Play current chunk
-            if (currentFile != null && !ct.IsCancellationRequested)
-            {
-                _logger.LogInformation("[ClipboardTts] Playing chunk {Index}/{Total}", i + 1, chunks.Count);
-                try
-                {
-                    await _audioPlayer.PlayAsync(currentFile, cancellationToken: ct);
-                }
-                finally
-                {
-                    try { File.Delete(currentFile); } catch { }
-                }
-            }
-
-            // Wait for next chunk's synthesis to finish (should be done or nearly done by now)
+        // Loop: play pre-synthesized chunk, adapt size, synthesize next while playing
+        while (nextChunkText != null && !ct.IsCancellationRequested)
+        {
+            // Wait for next chunk synthesis
             if (nextSynthTask != null)
             {
                 nextFile = await nextSynthTask;
                 nextSynthTask = null;
             }
+
+            // Adapt chunk size based on synthesis speed
+            AdaptChunkSize(ref chunkSize, synthMsPerChar, CharsPerSecond, TargetSynthRatio, MinChunk, MaxChunk);
+
+            // Prepare the chunk after this one
+            remainingText = text.AsSpan(position);
+            var upcomingText = ExtractChunk(remainingText, chunkSize, ref position);
+            if (upcomingText != null && nextFile != null)
+                nextSynthTask = SynthesizeToFileAsync(upcomingText, persona, ++chunkIndex, ct);
+            else
+                nextSynthTask = null;
+
+            // Play current chunk
+            if (nextFile != null && !ct.IsCancellationRequested)
+            {
+                _logger.LogInformation("[ClipboardTts] Playing chunk {Index} ({ChunkSize} chars target)", chunkIndex - 1, chunkSize);
+                try { await _audioPlayer.PlayAsync(nextFile, cancellationToken: ct); }
+                finally { try { File.Delete(nextFile); } catch { } }
+            }
+
+            nextFile = null;
+            nextChunkText = upcomingText;
         }
 
-        // Clean up if cancelled mid-synthesis
+        // Clean up
         if (nextSynthTask != null)
         {
             var trailing = await nextSynthTask;
             if (trailing != null) try { File.Delete(trailing); } catch { }
         }
 
-        _logger.LogInformation("[ClipboardTts] Playback complete ({ChunkCount} chunks)", chunks.Count);
+        _logger.LogInformation("[ClipboardTts] Playback complete ({ChunkCount} chunks, final chunk size {Size})", chunkIndex, chunkSize);
+    }
+
+    /// <summary>
+    /// Extract a chunk from text, breaking at sentence boundaries within the budget.
+    /// Returns null if nothing meaningful remains.
+    /// </summary>
+    private static string? ExtractChunk(ReadOnlySpan<char> text, int maxLen, ref int position)
+    {
+        if (text.Length == 0) return null;
+
+        var budget = Math.Min(maxLen, text.Length);
+        var chunk = text[..budget].ToString();
+
+        // Try to break at the last sentence boundary within budget
+        if (chunk.Length > 200)
+        {
+            var lastSentence = -1;
+            for (var i = 0; i < chunk.Length - 1; i++)
+            {
+                if (chunk[i] is '.' or '!' or '?' && chunk[i + 1] is ' ' or '\n' or '\r')
+                    lastSentence = i + 1;
+            }
+            if (lastSentence > chunk.Length / 2) // only break if we keep most of the budget
+                chunk = chunk[..lastSentence];
+        }
+
+        chunk = chunk.Trim();
+        if (chunk.Length < 20) return null;
+
+        position += chunk.Length;
+        // Skip whitespace between chunks
+        while (position < text.Length && char.IsWhiteSpace(text[position]))
+            position++;
+
+        return chunk;
+    }
+
+    private static void AdaptChunkSize(ref int chunkSize, double synthMsPerChar, double charsPerSecond, double targetRatio, int min, int max)
+    {
+        // Estimated synthesis time = chunkSize * synthMsPerChar
+        // Estimated playback time = chunkSize / charsPerSecond * 1000
+        // We want synth ≤ targetRatio * playback
+        // => chunkSize * synthMsPerChar ≤ targetRatio * chunkSize / charsPerSecond * 1000
+        // => synthMsPerChar ≤ targetRatio * 1000 / charsPerSecond
+        // => targetMsPerChar = targetRatio * 1000 / charsPerSecond
+        var targetMsPerChar = targetRatio * 1000.0 / charsPerSecond;
+
+        if (synthMsPerChar > targetMsPerChar)
+        {
+            // Synthesis is slow — shrink chunks so they fit in playback time
+            var idealSize = (int)(targetMsPerChar / synthMsPerChar * chunkSize);
+            chunkSize = Math.Max(min, Math.Min(max, idealSize));
+        }
+        else
+        {
+            // Synthesis is fast — grow chunks for fewer boundaries / better prosody
+            var growth = Math.Min(max, (int)(chunkSize * 1.3));
+            chunkSize = Math.Max(chunkSize, growth);
+        }
     }
 
     private async Task<string?> SynthesizeToFileAsync(string chunk, (VoicePersona Persona, string Key) persona, int index, CancellationToken ct)
