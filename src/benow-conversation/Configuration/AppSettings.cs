@@ -190,6 +190,8 @@ public class ClipboardTtsSettings
     public string Persona { get; set; } = "";
     /// <summary>Whether the clipboard TTS feature is enabled.</summary>
     public bool Enabled { get; set; } = true;
+    /// <summary>Max characters per TTS chunk. Larger = fewer boundaries but longer synthesis. Default 1000.</summary>
+    public int MaxChunkLength { get; set; } = 1000;
 }
 
 public class GroqSettings

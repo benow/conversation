@@ -148,7 +148,8 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
 
     private async Task PlayTextAsync(string text, (VoicePersona Persona, string Key) persona, CancellationToken ct)
     {
-        var splitter = new ParagraphSplitter();
+        var maxChunk = _settings.ClipboardTts.MaxChunkLength;
+        var splitter = new ParagraphSplitter(maxChunkLength: maxChunk);
         splitter.Append(text);
 
         // Collect all chunks up front
@@ -161,7 +162,7 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
 
         if (chunks.Count == 0) return;
 
-        _logger.LogInformation("[ClipboardTts] {ChunkCount} chunks queued", chunks.Count);
+        _logger.LogInformation("[ClipboardTts] {ChunkCount} chunks queued (max {MaxChunk} chars each)", chunks.Count, maxChunk);
 
         // Synthesize + play with overlap: synthesize chunk N, then start chunk N+1 synthesis
         // while chunk N plays. Only 1 concurrent Replicate request at a time.
