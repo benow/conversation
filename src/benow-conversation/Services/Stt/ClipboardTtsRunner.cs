@@ -73,9 +73,13 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
                 if (_isPlaying)
                 {
                     _logger.LogInformation("[ClipboardTts] Stop requested");
+                    await PlayBeepAsync("beep_stop");
                     StopPlayback();
                     continue;
                 }
+
+                // Confirmation beep
+                await PlayBeepAsync("beep_ready");
 
                 // Read clipboard
                 var text = await _clipboard.ReadAsync(cancellationToken);
@@ -217,5 +221,42 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
         }
 
         return null;
+    }
+
+    private async Task PlayBeepAsync(string name)
+    {
+        try
+        {
+            var beepFile = Path.Combine(Path.GetTempPath(), $"cbtts_{name}.wav");
+
+            if (!File.Exists(beepFile))
+            {
+                var resource = $"benow_conversation.Resources.{name}.wav";
+                using var stream = typeof(ClipboardTtsRunner).Assembly.GetManifestResourceStream(resource);
+                if (stream == null)
+                {
+                    _logger.LogWarning("[ClipboardTts] Beep resource {Resource} not found", resource);
+                    return;
+                }
+                using var outFile = File.Create(beepFile);
+                await stream.CopyToAsync(outFile);
+            }
+
+            var playArgs = $"-nodisp -autoexit -volume 80 \"{beepFile}\"";
+            using var playProc = Process.Start(new ProcessStartInfo
+            {
+                FileName = "ffplay",
+                Arguments = playArgs,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            await playProc!.WaitForExitAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ClipboardTts] Beep playback failed: {Error}", ex.Message);
+        }
     }
 }
