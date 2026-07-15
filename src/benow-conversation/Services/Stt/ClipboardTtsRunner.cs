@@ -155,35 +155,7 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
             chunkIndex++;
             _logger.LogInformation("[ClipboardTts] Chunk {Index}: {Length} chars", chunkIndex, chunk!.Length);
 
-            // Synthesize
-            await using var audioStream = await _ttsProvider.SynthesizeAsync(
-                chunk,
-                persona.Key,
-                persona.Persona.Voice,
-                persona.Persona.OpenAiInstructions,
-                persona.Persona.Temperature,
-                persona.Persona.Seed,
-                ct);
-
-            // Convert to PCM
-            using var buffer = new MemoryStream();
-            await audioStream.CopyToAsync(buffer, ct);
-            var audioBytes = buffer.ToArray();
-            var sourceFormat = _ttsProvider.OutputFormat;
-            audioBytes = await _formatConverter.ConvertAsync(audioBytes, sourceFormat, ct);
-
-            if (ct.IsCancellationRequested) break;
-
-            // Play
-            using var playMs = new MemoryStream(audioBytes);
-            if (_pipeline != null)
-            {
-                await _pipeline.PipeAsync(playMs, ct);
-            }
-            else
-            {
-                await _audioPlayer.PlayStreamAsync(playMs, "pcm", cancellationToken: ct);
-            }
+            await PlayChunkAsync(chunk, persona, chunkIndex, ct);
         }
 
         // Flush remaining buffer
@@ -192,33 +164,41 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
         {
             chunkIndex++;
             _logger.LogInformation("[ClipboardTts] Final chunk {Index}: {Length} chars", chunkIndex, remaining.Length);
-
-            await using var audioStream = await _ttsProvider.SynthesizeAsync(
-                remaining,
-                persona.Key,
-                persona.Persona.Voice,
-                persona.Persona.OpenAiInstructions,
-                persona.Persona.Temperature,
-                persona.Persona.Seed,
-                ct);
-
-            using var buffer = new MemoryStream();
-            await audioStream.CopyToAsync(buffer, ct);
-            var audioBytes = buffer.ToArray();
-            audioBytes = await _formatConverter.ConvertAsync(audioBytes, _ttsProvider.OutputFormat, ct);
-
-            using var playMs = new MemoryStream(audioBytes);
-            if (_pipeline != null)
-            {
-                await _pipeline.PipeAsync(playMs, ct);
-            }
-            else
-            {
-                await _audioPlayer.PlayStreamAsync(playMs, "pcm", cancellationToken: ct);
-            }
+            await PlayChunkAsync(remaining, persona, chunkIndex, ct);
         }
 
         _logger.LogInformation("[ClipboardTts] Playback complete ({ChunkCount} chunks)", chunkIndex);
+    }
+
+    private async Task PlayChunkAsync(string chunk, (VoicePersona Persona, string Key) persona, int index, CancellationToken ct)
+    {
+        // Synthesize
+        await using var audioStream = await _ttsProvider.SynthesizeAsync(
+            chunk,
+            persona.Key,
+            persona.Persona.Voice,
+            persona.Persona.OpenAiInstructions,
+            persona.Persona.Temperature,
+            persona.Persona.Seed,
+            ct);
+
+        // Save to temp file and play via file path (avoids PCM streaming issues)
+        var tempFile = Path.Combine(Path.GetTempPath(), $"cbtts_{Guid.NewGuid():N}.wav");
+        try
+        {
+            using (var fileStream = File.Create(tempFile))
+                await audioStream.CopyToAsync(fileStream, ct);
+
+            _logger.LogInformation("[ClipboardTts] Chunk {Index}: playing {Bytes} bytes from {File}",
+                index, new FileInfo(tempFile).Length, tempFile);
+            await _audioPlayer.PlayAsync(tempFile, cancellationToken: ct);
+            _logger.LogInformation("[ClipboardTts] Chunk {Index}: playback finished", index);
+        }
+        finally
+        {
+            try { File.Delete(tempFile); }
+            catch (Exception ex) { _logger.LogDebug(ex, "[ClipboardTts] Failed to delete temp file {File}", tempFile); }
+        }
     }
 
     private (VoicePersona Persona, string Key)? ResolvePersona()
