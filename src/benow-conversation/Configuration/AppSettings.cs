@@ -12,6 +12,8 @@ public class AppSettings
     public ProxySettings Proxy { get; set; } = new();
     public SttSettings Stt { get; set; } = new();
     public GroqSettings Groq { get; set; } = new();
+    /// <summary>Configuration for Ctrl+Comma clipboard TTS playback.</summary>
+    public ClipboardTtsSettings ClipboardTts { get; set; } = new();
     public TranscriptCleanupSettings TranscriptCleanup { get; set; } = new();
     public Dictionary<string, VoicePersona> Personas { get; set; } = new();
     /// <summary>Tracks per-conversation persona usage history.</summary>
@@ -178,6 +180,16 @@ public class SttSettings
     public string? TriggerCodes { get; set; }
     public string TriggerKey { get; set; } = "Ctrl+Space";
     public bool FeedbackBeep { get; set; } = true;
+}
+
+public class ClipboardTtsSettings
+{
+    /// <summary>Hotkey combo to trigger clipboard TTS (e.g., "Ctrl+Comma").</summary>
+    public string TriggerKey { get; set; } = "Ctrl+Comma";
+    /// <summary>Persona key for voice synthesis. Falls back to first IsDefault persona if empty.</summary>
+    public string Persona { get; set; } = "";
+    /// <summary>Whether the clipboard TTS feature is enabled.</summary>
+    public bool Enabled { get; set; } = true;
 }
 
 public class GroqSettings

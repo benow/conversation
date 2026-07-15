@@ -80,6 +80,7 @@ var host = Host.CreateDefaultBuilder()
         });
 
         RegisterSttServices(services, context.Configuration);
+        RegisterClipboardTtsServices(services, context.Configuration);
 
         services.AddHttpClient("OpenRouter", client =>
         {
@@ -397,6 +398,7 @@ try
         var proxyService = host.Services.GetRequiredService<IProxyService>();
         var speechQueue = host.Services.GetRequiredService<ISpeechQueue>();
         var sttRunner = host.Services.GetRequiredService<ISttRunner>();
+        var clipboardTtsRunner = host.Services.GetRequiredService<IClipboardTtsRunner>();
         var pipeline = host.Services.GetRequiredService<IPersistentAudioPipeline>();
 
         using var cts = new CancellationTokenSource();
@@ -413,11 +415,12 @@ try
 
         var proxyTask = proxyService.RunAsync(cts.Token);
         var sttTask = sttRunner.RunAsync(cts.Token);
+        var cbTtsTask = clipboardTtsRunner.RunAsync(cts.Token);
 
-        await Task.WhenAny(proxyTask, sttTask);
+        await Task.WhenAny(proxyTask, sttTask, cbTtsTask);
         cts.Cancel();
 
-        try { await Task.WhenAll(proxyTask, sttTask); } catch { }
+        try { await Task.WhenAll(proxyTask, sttTask, cbTtsTask); } catch { }
 
         await speechQueue.StopAsync(CancellationToken.None);
         if (pipeline is IAsyncDisposable d)
@@ -432,6 +435,8 @@ try
         PipeWireRecorder.KillOrphanedProcesses();
 
         var sttRunner = host.Services.GetRequiredService<ISttRunner>();
+        var clipboardTtsRunner = host.Services.GetRequiredService<IClipboardTtsRunner>();
+        var pipeline = host.Services.GetRequiredService<IPersistentAudioPipeline>();
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -440,7 +445,19 @@ try
             cts.Cancel();
         };
 
-        await sttRunner.RunAsync(cts.Token);
+        if (pipeline != null)
+            await pipeline.StartAsync(cts.Token);
+
+        var sttTask = sttRunner.RunAsync(cts.Token);
+        var cbTtsTask = clipboardTtsRunner.RunAsync(cts.Token);
+
+        await Task.WhenAny(sttTask, cbTtsTask);
+        cts.Cancel();
+
+        try { await Task.WhenAll(sttTask, cbTtsTask); } catch { }
+
+        if (pipeline is IAsyncDisposable d)
+            await d.DisposeAsync();
         await Log.CloseAndFlushAsync();
         return;
     }
@@ -1093,6 +1110,24 @@ static void RegisterSttServices(IServiceCollection services, IConfiguration conf
     }
 
     services.AddSingleton<ISttRunner, SttRunner>();
+}
+
+static void RegisterClipboardTtsServices(IServiceCollection services, IConfiguration configuration)
+{
+    var cbSection = configuration.GetSection("ClipboardTts");
+    var triggerKey = cbSection.GetSection("TriggerKey").Value ?? "Ctrl+Comma";
+    var debounceMs = cbSection.GetSection("TriggerDebounceMs").Value;
+    var effectiveDebounce = string.IsNullOrEmpty(debounceMs) ? 300 : int.Parse(debounceMs);
+
+    Log.Information("[ClipboardTts] Config — triggerKey={TriggerKey}, debounceMs={DebounceMs}", triggerKey, effectiveDebounce);
+
+    services.AddSingleton(sp =>
+    {
+        var logger = sp.GetRequiredService<ILogger<ClipboardTtsTrigger>>();
+        return new ClipboardTtsTrigger(triggerKey, effectiveDebounce, logger);
+    });
+
+    services.AddSingleton<IClipboardTtsRunner, ClipboardTtsRunner>();
 }
 
 static void PrintUsage(IServiceProvider services)

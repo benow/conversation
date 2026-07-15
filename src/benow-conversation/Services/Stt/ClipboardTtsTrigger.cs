@@ -1,50 +1,23 @@
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
-using benow_conversation.Configuration;
-using benow_conversation.Services.Abstractions;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace benow_conversation.Services.Stt;
 
-public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
+/// <summary>
+/// Lightweight evdev keyboard hotkey trigger for clipboard TTS.
+/// Takes key spec and debounce as constructor parameters (not from IOptions).
+/// </summary>
+public class ClipboardTtsTrigger : IDisposable
 {
     private const ushort EV_KEY = 0x01;
     private const int INPUT_EVENT_SIZE = 24;
 
-    internal static readonly Dictionary<string, ushort> KeyNameToCode = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Space"] = 57, ["Enter"] = 28, ["Esc"] = 1, ["Escape"] = 1,
-        ["Tab"] = 15, ["Backspace"] = 14, ["Delete"] = 111, ["Insert"] = 110,
-        ["Home"] = 102, ["End"] = 107, ["PageUp"] = 104, ["PageDown"] = 109,
-        ["Up"] = 103, ["Down"] = 108, ["Left"] = 105, ["Right"] = 106,
-        ["Ctrl"] = 29, ["LeftCtrl"] = 29, ["RightCtrl"] = 97,
-        ["Alt"] = 56, ["LeftAlt"] = 56, ["RightAlt"] = 100,
-        ["Shift"] = 42, ["LeftShift"] = 42, ["RightShift"] = 54,
-        ["Super"] = 125, ["Meta"] = 125,
-        ["F1"] = 59, ["F2"] = 60, ["F3"] = 61, ["F4"] = 62,
-        ["F5"] = 63, ["F6"] = 64, ["F7"] = 65, ["F8"] = 66,
-        ["F9"] = 67, ["F10"] = 68, ["F11"] = 87, ["F12"] = 88,
-        ["A"] = 30, ["B"] = 48, ["C"] = 46, ["D"] = 32, ["E"] = 18,
-        ["F"] = 33, ["G"] = 34, ["H"] = 35, ["I"] = 23, ["J"] = 36,
-        ["K"] = 37, ["L"] = 38, ["M"] = 50, ["N"] = 49, ["O"] = 24,
-        ["P"] = 25, ["Q"] = 16, ["R"] = 19, ["S"] = 31, ["T"] = 20,
-        ["U"] = 22, ["V"] = 47, ["W"] = 17, ["X"] = 45, ["Y"] = 21, ["Z"] = 44,
-        ["0"] = 11, ["1"] = 2, ["2"] = 3, ["3"] = 4, ["4"] = 5,
-        ["5"] = 6, ["6"] = 7, ["7"] = 8, ["8"] = 9, ["9"] = 10,
-        ["Grave"] = 41, ["Minus"] = 12, ["Equal"] = 13, ["BracketLeft"] = 26,
-        ["BracketRight"] = 27, ["Backslash"] = 43, ["Semicolon"] = 39,
-        ["Apostrophe"] = 40, ["Comma"] = 51, ["Period"] = 52, ["Slash"] = 53,
-        ["CapsLock"] = 58, ["NumLock"] = 69, ["ScrollLock"] = 70,
-        ["Print"] = 99, ["PrintScreen"] = 99, ["Pause"] = 119, ["Break"] = 419,
-    };
-
-    internal static readonly HashSet<ushort> ModifierCodes = [29, 97, 56, 100, 42, 54, 125];
-
-    private readonly ILogger<EvdevKeyboardTrigger> _logger;
+    private readonly ILogger<ClipboardTtsTrigger> _logger;
     private readonly int _debounceMs;
     private readonly HashSet<ushort> _modifierCodes;
     private readonly ushort _triggerKeyCode;
+    private readonly string _keySpec;
     private readonly Channel<bool> _channel = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
     {
         FullMode = BoundedChannelFullMode.DropOldest,
@@ -58,51 +31,37 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
     private readonly CancellationTokenSource _readCts = new();
     private long _lastTriggerTicks;
     private readonly bool _isAvailable;
-
     private readonly HashSet<ushort> _heldModifiers = [];
 
     public bool IsAvailable => _isAvailable;
 
-    public EvdevKeyboardTrigger(IOptions<AppSettings> settings, ILogger<EvdevKeyboardTrigger> logger)
+    public ClipboardTtsTrigger(string keySpec, int debounceMs, ILogger<ClipboardTtsTrigger> logger)
     {
         _logger = logger;
-        _debounceMs = settings.Value.Stt.TriggerDebounceMs;
+        _keySpec = keySpec;
+        _debounceMs = debounceMs;
 
-        var keySpec = settings.Value.Stt.TriggerKey;
-        var (modifiers, triggerKey) = ParseKeySpec(keySpec);
+        var (modifiers, triggerKey) = EvdevKeyboardTrigger.ParseKeySpec(keySpec);
         _modifierCodes = modifiers;
         _triggerKeyCode = triggerKey;
 
-        _logger.LogInformation("[Trigger] Key binding: {KeySpec} → mods=[{Mods}] trigger={Trigger}({Code})",
-            keySpec, string.Join("+", _modifierCodes.Select(c => KeyNameToCode.FirstOrDefault(k => k.Value == c).Key ?? c.ToString())),
-            KeyNameToCode.FirstOrDefault(k => k.Value == _triggerKeyCode).Key ?? _triggerKeyCode.ToString(), _triggerKeyCode);
+        _logger.LogInformation("[ClipboardTts:Trigger] Key binding: {KeySpec} → mods=[{Mods}] trigger={Code}",
+            keySpec,
+            string.Join("+", _modifierCodes.Select(c =>
+                EvdevKeyboardTrigger.KeyNameToCode.FirstOrDefault(k => k.Value == c).Key ?? c.ToString())),
+            EvdevKeyboardTrigger.KeyNameToCode.FirstOrDefault(k => k.Value == _triggerKeyCode).Key ?? _triggerKeyCode.ToString());
 
         _isAvailable = Initialize();
     }
 
-    public static (HashSet<ushort> modifiers, ushort triggerKey) ParseKeySpec(string? keySpec)
+    public async Task WaitForTriggerAsync(CancellationToken ct)
     {
-        var modifiers = new HashSet<ushort>();
-        ushort triggerKey = 57;
-
-        if (string.IsNullOrWhiteSpace(keySpec))
-            return (new HashSet<ushort> { 29 }, 57);
-
-        var parts = keySpec.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
-        foreach (var part in parts[..^1])
+        try
         {
-            if (KeyNameToCode.TryGetValue(part, out var code))
-                modifiers.Add(code);
+            await _channel.Reader.ReadAsync(ct);
         }
-
-        if (parts.Length > 0 && KeyNameToCode.TryGetValue(parts[^1], out var triggerCode))
-            triggerKey = triggerCode;
-
-        if (modifiers.Count == 0)
-            modifiers.Add(29);
-
-        return (modifiers, triggerKey);
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (ChannelClosedException) { throw new OperationCanceledException("Trigger channel closed"); }
     }
 
     // ─── Initialization ────────────────────────────────────────────────
@@ -111,7 +70,7 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
     {
         if (!Directory.Exists("/dev/input"))
         {
-            _logger.LogWarning("[Trigger] /dev/input does not exist");
+            _logger.LogWarning("[ClipboardTts:Trigger] /dev/input does not exist");
             return false;
         }
 
@@ -121,7 +80,7 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
 
         if (keyboards.Count == 0)
         {
-            _logger.LogWarning("[Trigger] No keyboard devices found");
+            _logger.LogWarning("[ClipboardTts:Trigger] No keyboard devices found");
             return false;
         }
 
@@ -131,20 +90,20 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
             var fd = LinuxInterop.open(path, LinuxInterop.O_RDONLY);
             if (fd < 0)
             {
-                _logger.LogDebug("[Trigger] Cannot open {Device} ({Name}): errno={Errno}", path, name,
+                _logger.LogDebug("[ClipboardTts:Trigger] Cannot open {Device} ({Name}): errno={Errno}", path, name,
                     Marshal.GetLastWin32Error());
                 continue;
             }
 
             lock (_pathToFdLock) _pathToFd[path] = fd;
-            _logger.LogInformation("[Trigger] Monitoring: {Device} ({Name})", path, name);
+            _logger.LogInformation("[ClipboardTts:Trigger] Monitoring: {Device} ({Name})", path, name);
             StartReader(fd, path);
             monitorCount++;
         }
 
         if (monitorCount == 0)
         {
-            _logger.LogWarning("[Trigger] Could not open any keyboard device (need 'input' group?)");
+            _logger.LogWarning("[ClipboardTts:Trigger] Could not open any keyboard device (need 'input' group?)");
             return false;
         }
 
@@ -152,7 +111,7 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
         return true;
     }
 
-    // ─── Reader (simple poll loop, no reconnect) ───────────────────────
+    // ─── Reader (simple poll loop) ───────────────────────────────────
 
     private void StartReader(int fd, string path)
     {
@@ -171,13 +130,13 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
                     {
                         var errno = Marshal.GetLastWin32Error();
                         if (errno == LinuxInterop.EINTR) continue;
-                        _logger.LogDebug("[Trigger] poll() error on {Path}: errno={Errno}", path, errno);
+                        _logger.LogDebug("[ClipboardTts:Trigger] poll() error on {Path}: errno={Errno}", path, errno);
                         break;
                     }
                     if (result == 0) continue;
                     if ((pollFds[0].revents & (LinuxInterop.POLLERR | LinuxInterop.POLLHUP)) != 0)
                     {
-                        _logger.LogDebug("[Trigger] {Path} disconnected", path);
+                        _logger.LogDebug("[ClipboardTts:Trigger] {Path} disconnected", path);
                         break;
                     }
                     if ((pollFds[0].revents & LinuxInterop.POLLIN) == 0) continue;
@@ -191,7 +150,7 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
 
                     if (type != EV_KEY) continue;
 
-                    if (ModifierCodes.Contains(code))
+                    if (EvdevKeyboardTrigger.ModifierCodes.Contains(code))
                     {
                         if (value == 1) _heldModifiers.Add(code);
                         else if (value == 0) _heldModifiers.Remove(code);
@@ -206,25 +165,25 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
                         if (TimeSpan.FromTicks(now - last).TotalMilliseconds < _debounceMs) continue;
 
                         Interlocked.Exchange(ref _lastTriggerTicks, now);
-                        _logger.LogInformation("[Trigger] Hotkey detected on {Path}", path);
+                        _logger.LogInformation("[ClipboardTts:Trigger] Hotkey detected on {Path}", path);
                         _channel.Writer.TryWrite(true);
                     }
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "[Trigger] Reader error on {Path}: {Message}", path, ex.Message);
+                    _logger.LogDebug(ex, "[ClipboardTts:Trigger] Reader error on {Path}: {Message}", path, ex.Message);
                     break;
                 }
             }
 
-            _logger.LogDebug("[Trigger] Reader stopped for {Path}", path);
+            _logger.LogDebug("[ClipboardTts:Trigger] Reader stopped for {Path}", path);
         }, _readCts.Token);
 
         _readerTasks.Add(task);
     }
 
-    // ─── Heartbeat (rescans and diffs keyboard devices) ────────────────
+    // ─── Heartbeat (rescans keyboard devices) ──────────────────────────
 
     private void StartHeartbeat()
     {
@@ -235,14 +194,14 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
                 try { SyncKeyboardDevices(); }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "[Trigger] Heartbeat error: {Message}", ex.Message);
+                    _logger.LogDebug(ex, "[ClipboardTts:Trigger] Heartbeat error: {Message}", ex.Message);
                 }
 
                 try { await Task.Delay(2000, _readCts.Token); }
                 catch { break; }
             }
 
-            _logger.LogDebug("[Trigger] Heartbeat stopped");
+            _logger.LogDebug("[ClipboardTts:Trigger] Heartbeat stopped");
         }, _readCts.Token));
     }
 
@@ -255,16 +214,14 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
 
         lock (_pathToFdLock)
         {
-            // Close FDs for keyboards that no longer exist
             var gone = _pathToFd.Keys.Except(currentKeyboards, StringComparer.OrdinalIgnoreCase).ToList();
             foreach (var path in gone)
             {
                 try { LinuxInterop.close(_pathToFd[path]); } catch { }
                 _pathToFd.Remove(path);
-                _logger.LogDebug("[Trigger] Stopped monitoring {Path} (device gone)", path);
+                _logger.LogDebug("[ClipboardTts:Trigger] Stopped monitoring {Path} (device gone)", path);
             }
 
-            // Open FDs and start readers for new keyboards
             foreach (var path in currentKeyboards)
             {
                 if (_pathToFd.ContainsKey(path)) continue;
@@ -272,7 +229,7 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
                 if (fd >= 0)
                 {
                     _pathToFd[path] = fd;
-                    _logger.LogInformation("[Trigger] Started monitoring new keyboard {Path}", path);
+                    _logger.LogInformation("[ClipboardTts:Trigger] Started monitoring new keyboard {Path}", path);
                     StartReader(fd, path);
                 }
             }
@@ -283,25 +240,12 @@ public class EvdevKeyboardTrigger : IRecordingTrigger, IDisposable
 
     private static bool IsKeyboard(string deviceName)
     {
-        if (!deviceName.Contains("keyboard", StringComparison.OrdinalIgnoreCase) &&
-            !deviceName.Contains("Keyboard", StringComparison.OrdinalIgnoreCase))
+        if (!deviceName.Contains("keyboard", StringComparison.OrdinalIgnoreCase))
             return false;
-
         if (deviceName.Contains("ydotoold", StringComparison.OrdinalIgnoreCase) ||
             deviceName.Contains("Controller", StringComparison.OrdinalIgnoreCase))
             return false;
-
         return true;
-    }
-
-    public async Task WaitForTriggerAsync(CancellationToken ct)
-    {
-        try
-        {
-            await _channel.Reader.ReadAsync(ct);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (ChannelClosedException) { throw new OperationCanceledException("Trigger channel closed"); }
     }
 
     public void Dispose()

@@ -83,4 +83,51 @@ public class WaylandClipboardService : IClipboardService
 
         _logger.LogDebug("[Clipboard] Copy successful");
     }
+
+    public async Task<string?> ReadAsync(CancellationToken ct = default)
+    {
+        if (!IsAvailable)
+            return null;
+
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "wl-paste",
+                Arguments = "--no-newline",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(psi);
+            if (process == null)
+            {
+                _logger.LogWarning("[Clipboard] wl-paste process failed to start");
+                return null;
+            }
+
+            var text = await process.StandardOutput.ReadToEndAsync(ct);
+            await process.WaitForExitAsync(ct);
+
+            if (process.ExitCode != 0)
+            {
+                var error = await process.StandardError.ReadToEndAsync(ct);
+                _logger.LogDebug("[Clipboard] wl-paste failed (exit {ExitCode}): {Error}", process.ExitCode, error);
+                return null;
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+
+            _logger.LogDebug("[Clipboard] Read {Length} chars from clipboard", text.Length);
+            return text;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Clipboard] Failed to read clipboard: {Error}", ex.Message);
+            return null;
+        }
+    }
 }
