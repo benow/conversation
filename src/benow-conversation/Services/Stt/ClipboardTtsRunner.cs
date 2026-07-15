@@ -102,15 +102,35 @@ public class ClipboardTtsRunner : IClipboardTtsRunner
                 var resolvedPersona = persona.Value;
 
                 _isPlaying = true;
-                _playbackCts = new CancellationTokenSource();
+                _playbackCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
                 try
                 {
-                    await PlayTextAsync(text, resolvedPersona, _playbackCts.Token);
+                    // Race playback against the hotkey trigger (for stop toggle)
+                    var playTask = PlayTextAsync(text, resolvedPersona, _playbackCts.Token);
+                    var triggerTask = _trigger.WaitForTriggerAsync(CancellationToken.None);
+
+                    var completed = await Task.WhenAny(playTask, triggerTask);
+
+                    if (completed == triggerTask && !playTask.IsCompleted)
+                    {
+                        // Hotkey pressed during playback → stop
+                        _logger.LogInformation("[ClipboardTts] Stop requested (hotkey during playback)");
+                        await PlayBeepAsync("beep_stop");
+                        StopPlayback();
+                        // Wait for playback to wind down
+                        try { await playTask; }
+                        catch (OperationCanceledException) { }
+                    }
+                    else
+                    {
+                        // Playback finished naturally (or app CTS cancelled)
+                        await playTask;
+                    }
                 }
-                catch (OperationCanceledException) when (_playbackCts?.IsCancellationRequested == true)
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    _logger.LogInformation("[ClipboardTts] Playback cancelled");
+                    _logger.LogInformation("[ClipboardTts] Playback cancelled (app shutdown)");
                 }
                 finally
                 {
