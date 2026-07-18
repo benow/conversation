@@ -107,10 +107,12 @@ public class SttRunner : ISttRunner
                 _logger.LogInformation("[STT] Cycle {Cycle}: stop trigger received", cycleCount);
                 recCts.Cancel();
 
+                // Await recording finalization BEFORE playing the beep,
+                // otherwise the beep gets picked up by the still-live microphone.
+                recordedFile = await recordingTask;
+
                 if (_settings.Stt.FeedbackBeep)
                     await PlayBeepAsync("beep_stop", cancellationToken);
-
-                recordedFile = await recordingTask;
                 _logger.LogInformation("[STT] Cycle {Cycle}: recording saved ({Ms}ms, {Size} bytes)", cycleCount, sw.ElapsedMilliseconds, new FileInfo(recordedFile).Length);
 
                 Console.WriteLine("[STT] Transcribing...");
