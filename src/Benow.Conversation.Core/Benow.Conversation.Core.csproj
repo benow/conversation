@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Phase-0 skeleton (docs/plans/conversation-v2.md in the nastv repo). Bump to 0.1.0
+         when the phase-1 extraction lands real contents; tags drive CI publishes. -->
+    <Version>0.0.1</Version>
+    <PackageId>Benow.Conversation.Core</PackageId>
+    <Authors>benow</Authors>
+    <Description>Shared conversation engine core: voice pipeline (VAD, segment dispatch, progressive TTS), AI providers (STT/LLM/TTS), LLM strategy, capture, and configuration. Consumed by the Conversation desktop app and NASTV.</Description>
+    <PackageProjectUrl>https://github.com/benow/conversation</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/benow/conversation</RepositoryUrl>
+    <!-- Dependency ceiling per the V2 plan §4.2: no ASP.NET, no DB drivers, no SDK refs —
+         must stay loadable inside NASTV's plugin zip (deps.json-free base-dir probing). -->
+  </PropertyGroup>
+
+</Project>

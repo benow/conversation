@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Benow.Conversation.Core/Benow.Conversation.Core.csproj" />
     <Project Path="src/benow-conversation/benow-conversation.csproj" />
   </Folder>
   <Folder Name="/tests/">

@@ -1,0 +1,45 @@
+name: publish-nuget
+
+# Pushes Benow.Conversation.Core to the private feed at nuget.benow.ca.
+# Anonymous pull; push auth via the NUGET_API_KEY secret (set 2026-09-13, value lives
+# root-only in /opt/bagetter/bagetter.env on the VPS — regenerate there if lost).
+# Tag-driven publishes (v*); workflow_dispatch for manual re-pushes (--skip-duplicate
+# makes re-publishing the same version a no-op).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build + test (full solution)
+        run: |
+          dotnet build
+          dotnet test --no-build
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Pack Core
+        run: dotnet pack src/Benow.Conversation.Core/Benow.Conversation.Core.csproj -c Release -o dist
+      - name: Push to nuget.benow.ca
+        run: |
+          dotnet nuget push 'dist/*.nupkg' \
+            -s https://nuget.benow.ca/v3/index.json \
+            -k ${NUGET_API_KEY} --skip-duplicate
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}

@@ -22,4 +22,4 @@ voices/
 .tmp/
 
 tests/**/fixtures/*.pending
-.venv*/
+.venv*/dist/
