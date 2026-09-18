@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <!-- Phase 2 complete (docs/plans/conversation-v2.md in the nastv repo): + runnable engine
          (capture, playback, provider clients, conversation engine), config store. Tags drive CI publishes. -->
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <PackageId>Benow.Conversation.Core</PackageId>
     <Authors>benow</Authors>
     <Description>Shared conversation engine core: voice pipeline (VAD, segment dispatch, progressive TTS), AI providers (STT/LLM/TTS), LLM strategy, capture, and configuration. Consumed by the Conversation desktop app and NASTV.</Description>
