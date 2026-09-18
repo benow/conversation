@@ -1,0 +1,15 @@
+{
+  "name": "edge-case-mixed-gender-formats",
+  "description": "LLM generates mixed gender formats: lowercase f, full word Female, dash separator, space separator. Validates parser handles all formats and defaults to female.",
+  "source": "synthetic",
+  "input": "[Alice:f](whisper)Hello there[Bob:F]How are you[Charlie:female]I am fine[David - M]Actually I am David[Diana F]*waves* hello",
+  "expectedCoverage": { "minPercent": 40 },
+  "expectedSegments": [
+    { "characterName": "Alice", "gender": "F", "modifier": "whisper", "isNarration": false, "spokenTextContains": "Hello there" },
+    { "characterName": "Bob", "gender": "F", "isNarration": false, "spokenTextContains": "How are you" },
+    { "characterName": "Charlie", "gender": "F", "isNarration": false, "spokenTextContains": "I am fine" },
+    { "characterName": "David", "gender": "M", "isNarration": false, "spokenTextContains": "Actually I am David" },
+    { "characterName": "Diana", "gender": "F", "isNarration": true, "spokenTextContains": "waves" },
+    { "characterName": "Diana", "gender": "F", "isNarration": false, "spokenTextContains": "hello" }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "edge-case-unknown-modifier-rejected",
+  "description": "The modifier injector wraps an entire paragraph of narration in parentheses. The parser must reject this unknown long modifier and keep all text as spoken text.",
+  "source": "production log 2026-05-30 ~11:58",
+  "input": "[Mopsie:F](Mopsie is still busy adjusting the water temperature and pressure, ensuring that everyone is comfortable and relaxed in the shower room. However, it is starting to get a bit overwhelmed by the intensity of the scene, its beeps and boops becoming more frantic and excited)The atmosphere in the shower room is electric, the girls excitement and curiosity reaching new heights as they continue to explore and discover the world around them.",
+  "expectedCoverage": { "minPercent": 85 },
+  "expectedSegments": [
+    {
+      "characterName": "Mopsie",
+      "gender": "F",
+      "isNarration": false,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "adjusting the water temperature"
+    }
+  ]
+}

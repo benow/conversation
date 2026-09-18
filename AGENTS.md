@@ -76,5 +76,17 @@ ai-plugin/provider-httpclient-auth-accumulation, fix at adoption); AiProviderIns
 helpers over ILegacyProviderConfig (PluginConfig/desktop settings implement it); ModelCapabilityCache.
 ConversationJson.Options mirrors NastvShared.JsonDefaults (camelCase + case-insensitive — the
 case-sensitivity bug class). 27 tests green.
-Next tranches: VoiceEndpoints prompt/LLM statics + SttGate pacing (extractor/speaker strategy),
-V1 TTS multi-character pipeline merge; 0.1.0 tag at phase exit.
+Tranche 3 (LLM turn strategy, `Benow.Conversation.Llm`): PromptBuilders (extractor/speaker
+message builders — F4/D6 invariants guarded by ported ExtractorPipelineCompositionTests;
+persona NEVER reaches the extractor, speaker NEVER sees tool schemas; persona-first ordering
+with grounding anchor last) + PromptConstants; LlmProtocol (tool-envelope brace-walker,
+SplitForStreaming, tools-unsupported classification, provider/model mismatch classify,
+BrowserUserAgent); ProviderPacing (SttPacer 600ms + SttGate, TtsReplicateGate — the
+Groq/Cloudflare and Replicate-serial-GPU lessons); WavDecoder (full RIFF walk, float/8/16/24-bit,
+downmix; BuildProviderRoute/ResolveExtractorModel take primitives, no config-object coupling).
+Tranche 4 (V1 text pipeline, `Benow.Conversation.Tts`): CharacterParser + CharacterSegment
+(golden-master fixtures ported — Core parser reproduces V1 outputs EXACTLY), SentenceSplitter,
+ParagraphSplitter. CharacterNormalizer/PersonaAllocator stay V1-side (AppSettings/HttpClient
+coupling — seams designed in phase 2 with the service).
+PHASE 1 EXIT (2026-09-17): 0.1.0 tagged; full suite 108 Core + 184 V1 (4 skip baseline) green —
+V1 CLI behavior unchanged. Package on nuget.benow.ca via tag-driven publish-nuget.yml.

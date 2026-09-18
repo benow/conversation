@@ -18,4 +18,10 @@
     <ProjectReference Include="..\..\src\Benow.Conversation.Core\Benow.Conversation.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="fixtures\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

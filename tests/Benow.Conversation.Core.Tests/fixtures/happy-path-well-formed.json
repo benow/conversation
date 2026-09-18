@@ -1,0 +1,121 @@
+{
+  "name": "happy-path-well-formed",
+  "description": "Well-formatted multi-character script with proper [Name:F] markers, narration in *asterisks*, and dialogue. This is the expected output when the LLM follows the system prompt correctly.",
+  "source": "reconstructed from production log 2026-05-30 12:37 session (new prompt was applied)",
+  "input": " *The room erupts in a warm, inviting ambiance as the lights dim slightly, and the sound system starts playing a smooth, sultry jazz melody. The ladies, all stunning and elegantly dressed, turn their attention to you, their faces lit up with excitement and curiosity.*\n[Marina:F] *walks towards you, a glass of wine in her hand, her hips swaying gently*\n[Marina:F] Welcome, Andy. We've all been waiting for you.\n[Marina:F] *she hands you the glass*\n[Marina:F] Please, make yourself at home. We're so glad you could join us tonight.\n[Mia:F] *gets up from the couch, stretching her long, toned body, and flashes you a dazzling smile*\n[Mia:F] Yeah, we don't often get to meet someone as charming as you, Andy.\n[Mia:F] *she walks over to the bar, her high heels clicking on the floor*\n[Mia:F] Can I get you a drink? We have everything you could possibly want.\n[Sophia:F] *sits on the arm of the couch, leaning back, and eyeing you with interest*\n[Sophia:F] So, Andy, tell us about yourself. What brings you here tonight?\n[Sophia:F] *she runs her fingers through her long, curly hair, her eyes never leaving yours*\n[Sophia:F] *The other ladies gather around, their faces filled with anticipation, as they wait for your response.*\n[Sophia:F] *Mopsie, the janitor robot, quietly enters the room, beeping softly, and begins to tidy up as the evening progresses.*",
+  "expectedCoverage": { "minPercent": 85 },
+  "expectedSegments": [
+    {
+      "characterName": "",
+      "gender": "F",
+      "isNarration": true,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "The room erupts in a warm, inviting ambiance"
+    },
+    {
+      "characterName": "Marina",
+      "gender": "F",
+      "isNarration": true,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "walks towards you"
+    },
+    {
+      "characterName": "Marina",
+      "gender": "F",
+      "isNarration": false,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "Welcome, Andy"
+    },
+    {
+      "characterName": "Marina",
+      "gender": "F",
+      "isNarration": true,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "she hands you the glass"
+    },
+    {
+      "characterName": "Marina",
+      "gender": "F",
+      "isNarration": false,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "make yourself at home"
+    },
+    {
+      "characterName": "Mia",
+      "gender": "F",
+      "isNarration": true,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "flashes you a dazzling smile"
+    },
+    {
+      "characterName": "Mia",
+      "gender": "F",
+      "isNarration": false,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "someone as charming as you"
+    },
+    {
+      "characterName": "Mia",
+      "gender": "F",
+      "isNarration": true,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "her high heels clicking"
+    },
+    {
+      "characterName": "Mia",
+      "gender": "F",
+      "isNarration": false,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "Can I get you a drink"
+    },
+    {
+      "characterName": "Sophia",
+      "gender": "F",
+      "isNarration": true,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "sits on the arm of the couch"
+    },
+    {
+      "characterName": "Sophia",
+      "gender": "F",
+      "isNarration": false,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "tell us about yourself"
+    },
+    {
+      "characterName": "Sophia",
+      "gender": "F",
+      "isNarration": true,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "her fingers through her long, curly hair"
+    },
+    {
+      "characterName": "Sophia",
+      "gender": "F",
+      "isNarration": true,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "The other ladies gather around"
+    },
+    {
+      "characterName": "Sophia",
+      "gender": "F",
+      "isNarration": true,
+      "isThought": false,
+      "modifier": null,
+      "spokenTextContains": "Mopsie, the janitor robot"
+    }
+  ]
+}

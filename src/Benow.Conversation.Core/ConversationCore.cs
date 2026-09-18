@@ -1,12 +1,13 @@
 namespace Benow.Conversation;
 
 /// <summary>
-/// Marker for the Conversation V2 core extraction (phase 0 skeleton).
-/// Phase 1 (see docs/plans/conversation-v2.md in the nastv repo) fills this package with the
-/// voice pipeline (VAD, segment dispatch, progressive-TTS scheduling), the AI provider layer
-/// (STT/LLM/TTS), the LLM turn strategy, cross-platform capture, and the configuration model.
+/// Shared conversation engine core (phase 1 complete — see docs/plans/conversation-v2.md in
+/// the nastv repo): voice pipeline (VAD, sentence/pacing, WAV), AI providers (STT/LLM/TTS),
+/// the LLM turn strategy (extractor/speaker, prompt invariants, pacing gates), and the V1
+/// multi-character text pipeline (parser + splitters, golden-master verified).
+/// Phase 2 adds the service/host; capture abstraction follows.
 /// </summary>
 public static class ConversationCore
 {
-    public const string Version = "0.0.1";
+    public const string Version = "0.1.0";
 }

@@ -1,0 +1,15 @@
+{
+  "name": "happy-path-thoughts-and-narration",
+  "description": "Text with [thought] tags, *narration*, and (modifier) all combined. Validates full parser pipeline on complex input.",
+  "source": "synthetic from production patterns",
+  "input": "[Marina:F](whisper) *leans close* Hello there.[thought] *smiles inwardly* I wonder if he noticed.[/thought] *steps back* So, what do you think?",
+  "expectedCoverage": { "minPercent": 60 },
+  "expectedSegments": [
+    { "characterName": "Marina", "gender": "F", "modifier": "whisper", "isNarration": true, "isThought": false, "spokenTextContains": "leans close" },
+    { "characterName": "Marina", "gender": "F", "modifier": "whisper", "isNarration": false, "isThought": false, "spokenTextContains": "Hello there" },
+    { "characterName": "Marina", "gender": "F", "modifier": "whisper", "isNarration": true, "isThought": true, "spokenTextContains": "smiles inwardly" },
+    { "characterName": "Marina", "gender": "F", "modifier": "whisper", "isNarration": false, "isThought": true, "spokenTextContains": "I wonder if he noticed" },
+    { "characterName": "Marina", "gender": "F", "modifier": "whisper", "isNarration": true, "isThought": false, "spokenTextContains": "steps back" },
+    { "characterName": "Marina", "gender": "F", "modifier": "whisper", "isNarration": false, "isThought": false, "spokenTextContains": "what do you think" }
+  ]
+}
