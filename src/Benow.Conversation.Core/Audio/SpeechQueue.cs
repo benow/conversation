@@ -6,27 +6,44 @@ using Microsoft.Extensions.Logging;
 namespace Benow.Conversation.Audio;
 
 /// <summary>
-/// Serial speak queue: text in, audio out. Synthesizes each item via <see cref="ITtsService"/>
-/// and pipes the PCM to the playback pipeline. Cancel-on-new semantics (V1's SpeechQueue):
-/// enqueuing with <c>cancelCurrent</c> stops in-flight playback so a new turn is heard
-/// immediately rather than after the previous reply drains.
+/// Speak queue: text in, audio out. Synthesizes each item via <see cref="ITtsService"/> and pipes
+/// the PCM to the playback pipeline. Cancel-on-new semantics (V1's SpeechQueue): enqueuing with
+/// <c>cancelCurrent</c> stops in-flight playback so a new turn is heard immediately rather than
+/// after the previous reply drains.
+///
+/// SYNTHESIS RUNS AHEAD OF PLAYBACK (2026-09-18, found by the Lab's --bench). The original shape
+/// was one serial loop — synthesize chunk, pipe it (which blocks while ffplay plays it at 1x),
+/// then synthesize the next. With Replicate XTTS that produced 6.6s and 10.3s of DEAD SILENCE
+/// between chunks of one reply: chunk N+1's synthesis only started once chunk N's audio had
+/// drained. Two stages now run concurrently — a synthesizer filling a small look-ahead buffer and
+/// a player draining it — so chunk N+1 is ready before chunk N stops playing.
 /// Ported and simplified from V1's SpeechQueue (2026-09-17, phase 2) — the Core version speaks
 /// one provider (ITtsService) instead of V1's four backend branches.
 /// </summary>
 public sealed class SpeechQueue : IAsyncDisposable
 {
+    /// <summary>Chunks synthesized ahead of playback. Two is enough to hide provider jitter
+    /// (synthesis ~43ms/char vs playback ~65ms/char) without holding audio the user may interrupt.</summary>
+    private const int LookAheadChunks = 2;
+
     private readonly ITtsService _tts;
     private readonly PcmPlaybackPipeline _pipeline;
     private long _playbackMs;
     private volatile bool _inFlight;
     private readonly ILogger<SpeechQueue> _logger;
     private readonly Channel<string> _channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly Channel<SynthesizedAudio> _ready =
+        Channel.CreateBounded<SynthesizedAudio>(new BoundedChannelOptions(LookAheadChunks) { SingleReader = true, SingleWriter = true });
     private CancellationTokenSource? _currentItemCts;
     private Task? _processing;
+    private Task? _playing;
     private readonly CancellationTokenSource _shutdown = new();
     // ChannelReader.Count throws NotSupportedException on this channel shape (unbounded +
     // SingleReader — caught live 2026-09-18), so track the queue depth explicitly.
     private int _queued;
+
+    /// <summary>A synthesized chunk waiting for its turn to play.</summary>
+    private sealed record SynthesizedAudio(string Text, byte[] Pcm, long AudioMs, long SynthMs);
 
     /// <summary>Raised per completed item: (text, audioMs) — drives per-turn metrics.</summary>
     public event Action<string, long>? Spoken;
@@ -78,6 +95,9 @@ public sealed class SpeechQueue : IAsyncDisposable
     {
         var dropped = 0;
         while (_channel.Reader.TryRead(out _)) dropped++;
+        // Also drop anything synthesized ahead that has not started playing yet — otherwise the
+        // cancelled turn's audio would still be spoken after the interrupt.
+        while (_ready.Reader.TryRead(out _)) dropped++;
         Interlocked.Add(ref _queued, -dropped);
         _logger.LogInformation("[speech] flush + cancel (dropped {Dropped} queued)", dropped);
         FlushOnly();
@@ -99,17 +119,20 @@ public sealed class SpeechQueue : IAsyncDisposable
     public Task StartAsync(CancellationToken ct)
     {
         _processing = ProcessAsync(ct);
+        _playing = PlayAsync(ct);
         return Task.CompletedTask;
     }
 
     public async Task StopAsync()
     {
         _channel.Writer.TryComplete();
+        _ready.Writer.TryComplete();
         _shutdown.Cancel();
-        if (_processing != null)
-            await _processing;
+        foreach (var task in new[] { _processing, _playing })
+            if (task != null) await task;
     }
 
+    /// <summary>Stage 1: synthesize as fast as the provider allows, ahead of playback.</summary>
     private async Task ProcessAsync(CancellationToken ct)
     {
         await foreach (var text in _channel.Reader.ReadAllAsync(ct))
@@ -138,16 +161,9 @@ public sealed class SpeechQueue : IAsyncDisposable
                     text.Length, audio.Pcm.Length, audio.SampleRate, sw.ElapsedMilliseconds, audio.AudioMs);
                 ItemSynthesized?.Invoke(text, sw.ElapsedMilliseconds);
 
-                using var pcm = new MemoryStream(audio.Pcm);
-                // PlaybackStarted fires BEFORE the pipe: PipeAsync blocks while ffplay consumes at
-                // real-time rate, so firing after it reported "first audio" up to a second and a
-                // half late (and made chunk-gap maths nonsense — caught by the Lab's --bench).
-                var playbackSw = Stopwatch.StartNew();
-                PlaybackStarted?.Invoke(text, audio.AudioMs);
-                await _pipeline.PipeAsync(pcm, itemCts.Token);
-                _playbackMs += playbackSw.ElapsedMilliseconds;
-                ItemPiped?.Invoke(text);
-                Spoken?.Invoke(text, audio.AudioMs);
+                // Bounded: at most LookAheadChunks wait here, so a cancelled turn cannot leave a
+                // long tail of stale synthesized audio behind (FlushAndCancel empties this).
+                await _ready.Writer.WriteAsync(new SynthesizedAudio(text, audio.Pcm, audio.AudioMs, sw.ElapsedMilliseconds), itemCts.Token);
             }
             catch (OperationCanceledException) when (itemCts.IsCancellationRequested && !ct.IsCancellationRequested)
             {
@@ -162,6 +178,35 @@ public sealed class SpeechQueue : IAsyncDisposable
             {
                 _inFlight = false;
                 _currentItemCts = null;
+            }
+        }
+    }
+
+    /// <summary>Stage 2: drain synthesized chunks into the player, in order.</summary>
+    private async Task PlayAsync(CancellationToken ct)
+    {
+        await foreach (var item in _ready.Reader.ReadAllAsync(ct))
+        {
+            try
+            {
+                using var pcm = new MemoryStream(item.Pcm);
+                // PlaybackStarted fires BEFORE the pipe: PipeAsync blocks while ffplay consumes at
+                // real-time rate, so firing after it reported "first audio" up to a second and a
+                // half late (and made chunk-gap maths nonsense — caught by the Lab's --bench).
+                var playbackSw = Stopwatch.StartNew();
+                PlaybackStarted?.Invoke(item.Text, item.AudioMs);
+                await _pipeline.PipeAsync(pcm, ct);
+                _playbackMs += playbackSw.ElapsedMilliseconds;
+                ItemPiped?.Invoke(item.Text);
+                Spoken?.Invoke(item.Text, item.AudioMs);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[speech] playback failed ({Chars}c): {Error}", item.Text.Length, ex.Message);
             }
         }
     }

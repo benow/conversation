@@ -207,3 +207,45 @@ composition root and `DesktopHost` is the toolkit-free brain (all decision logic
   Avalonia headless harness (`Avalonia.Headless` + `.UseSkia()`, `UseHeadlessDrawing = false`)
   can build `ConverseOverlay`, drive host state, and `CaptureRenderedFrame().Save(png)`; inspect
   the PNG with the visor MCP. Two real layout bugs were found only this way (clipped hint text).
+
+## Latency work (phase 3, 2026-09-18) — what the bench measured
+
+`Lab --bench <wav>` runs a full turn through the REAL capture path (the WAV is replayed at native
+rate by ffmpeg `-re`) and reports stop→transcript, stop→first token, stop→first audio, stop→last
+audio and per-chunk playback gaps, with medians over `--repeat n`. Knobs: `--no-prewarm`,
+`--warmup ms`, `--no-correction`, `--first chars`, `--para chars`, `--mute`, `--out json`.
+
+**Three bugs the harness found (all fixed here, all regression-tested):**
+
+1. **The VAD ate the opening words.** Speech during the 500ms calibration window was DISCARDED, so
+   "What is a good way to keep coffee beans fresh" reached Whisper as "good way to keep coffee
+   beans fresh". Now the window is kept as bounded pre-roll context prepended to the first segment,
+   and the close/drop thresholds compare against SPEECH bytes (not segment length) so the pre-roll
+   cannot make a 2.3s burst close as 2.6s. Transcript became word-perfect on every run.
+   **NASTV's `nastv-player-core/Voice/VoiceVAD.cs:71` still has this bug** — finding filed.
+2. **Synthesis and playback were serialized.** Chunks of one reply are enqueued as the LLM streams
+   them, and the old loop synthesized a chunk, then piped it (blocking while ffplay played it at
+   1x), then synthesized the next. Measured inter-chunk silence: **6.6s and 10.3s**. The queue is
+   now two stages — a synthesizer filling a 2-chunk look-ahead buffer and a player draining it —
+   and the worst gap fell to **1.2s**. NASTV solved this in 2026-08-19/20 (parallel synthesis +
+   ordered emitter in `VoiceSession`); V2 re-derived it, which is exactly what the NASTV comment
+   warned about. Residual ~1s gap on a 2-chunk reply is inherent: the buffer starts cold because
+   chunk 1 must be synthesized before any audio plays.
+3. **Three instrumentation lies** (worse than no data): `ItemPiped` fired after the pipe — which
+   returns only once ffplay has consumed the audio — so "first audio" was up to 1.5s late;
+   `LastAudioPiped` was never marked (read -1); and `QueuedCount == 0` was treated as "finished"
+   although the queue passes through empty mid-reply. `PlaybackStarted` (before the pipe) and
+   `SpeechQueue.IsIdle` (queued empty AND nothing in flight) fix all three.
+
+**Where the time actually goes** (8s question, Replicate XTTS, deepseek-chat-v3.1 via OpenRouter):
+`stop→transcript` ~1.3-1.6s (streaming STT + full-audio correction) · `stop→first token` 4-13s (the
+LLM dominates and varies most) · `stop→first audio` 7.8-24.6s. **The dominant lever is reply
+LENGTH**: Replicate XTTS costs ~43ms/char to synthesize against ~65ms/char of audio, so a 250-char
+reply is ~11s of synthesis before you hear anything, and a 840-char reply ran the turn to 128s.
+A persona prompt that keeps replies short beats any pipeline tuning; per-chunk look-ahead only
+buys back the gaps. `PrewarmPlayback` was a dead option (documented lever, never wired) — now
+wired, worth ~0.5s off the first chunk.
+
+**Test-interference trap**: the V1 `PersistentAudioPipeline` swept EVERY ffplay on the machine
+(`GetProcessesByName`) — it killed V2's prewarmed player mid-pipe and hung the solution test run.
+Both are marker-scoped now (`conversation-pcm` / `conversation-v1-pcm`); keep them that way.

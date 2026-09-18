@@ -25,6 +25,8 @@ public class PersistentAudioPipeline : IPersistentAudioPipeline
     private bool _disposed;
     private DateTime _lastActivity = DateTime.MinValue;
     private static readonly TimeSpan IdleRestartThreshold = TimeSpan.FromMinutes(5);
+    /// <summary>Marker in the command line so the orphan sweep can identify our own players.</summary>
+    private const string PcmMarker = "conversation-v1-pcm";
 
     public PersistentAudioPipeline(
         ILogger<PersistentAudioPipeline> logger,
@@ -42,16 +44,40 @@ public class PersistentAudioPipeline : IPersistentAudioPipeline
         KillOrphanedProcesses();
     }
 
+    /// <summary>
+    /// Kills only OUR OWN leftover players, identified by the window-title marker in the command
+    /// line. This used to terminate EVERY ffplay/ffmpeg on the machine — including the user's own
+    /// media player and another test assembly's player (2026-09-18: it killed the V2 desktop
+    /// pipeline's prewarmed process mid-pipe and hung the solution test run). Marker-scoped is the
+    /// fix already applied in Benow.Conversation.Core; keep the two in step.
+    /// </summary>
     private void KillOrphanedProcesses()
     {
         try
         {
-            foreach (var proc in Process.GetProcessesByName("ffplay"))
+            var psi = new ProcessStartInfo
             {
+                FileName = "pgrep",
+                Arguments = $"-f \"ffplay.*{PcmMarker}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var pgrep = Process.Start(psi);
+            if (pgrep == null) return;
+            var output = pgrep.StandardOutput.ReadToEnd();
+            pgrep.WaitForExit(3000);
+
+            var myPid = Environment.ProcessId;
+            foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (!int.TryParse(line.Trim(), out var pid) || pid == myPid) continue;
                 try
                 {
+                    using var proc = Process.GetProcessById(pid);
                     proc.Kill(entireProcessTree: true);
-                    _logger.LogWarning("Killed orphaned ffplay pid={Pid} on startup", proc.Id);
+                    _logger.LogWarning("Killed orphaned ffplay pid={Pid} on startup", pid);
                 }
                 catch { }
             }
@@ -204,7 +230,7 @@ public class PersistentAudioPipeline : IPersistentAudioPipeline
 
     private string BuildArgs()
     {
-        var args = "-nodisp -loglevel quiet";
+        var args = $"-nodisp -loglevel quiet -window_title {PcmMarker}";
         args += $" -f s16le -ar {_pcmSampleRate}";
 
         if (_volume.HasValue)
