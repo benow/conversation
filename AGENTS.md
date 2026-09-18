@@ -68,6 +68,13 @@ WavWrapper (RIFF wrap — NASTV's plugin-side WrapAsWav is a duplicate; collapse
 and the service seams (ITranscriptionService/TranscriptionResult, ITtsService/TtsAudio,
 IVoiceLlmService/ChatTurn). Tests: `tests/Benow.Conversation.Core.Tests` (20, ported from
 nastv-player-core.tests). Dependency ceiling: Logging.Abstractions only.
-Next tranches: providers (IAiProvider + Groq/OpenRouter/Replicate/OpenAI-compatible,
-AiProviderInstances, capability cache), VoiceEndpoints prompt/LLM statics + SttGate pacing,
+Tranche 2 (provider layer, `Benow.Conversation.Providers`): IAiProvider + AiCapability +
+ModelInfo with a NEUTRAL ProviderConfigField/SelectOption (plugin maps to SDK types at
+phase-4 adoption); Groq/OpenRouter/Replicate/OpenAI-compatible providers (behavior verbatim —
+incl. the known shared-HttpClient Authorization wart, nastv finding
+ai-plugin/provider-httpclient-auth-accumulation, fix at adoption); AiProviderInstances catalog
+helpers over ILegacyProviderConfig (PluginConfig/desktop settings implement it); ModelCapabilityCache.
+ConversationJson.Options mirrors NastvShared.JsonDefaults (camelCase + case-insensitive — the
+case-sensitivity bug class). 27 tests green.
+Next tranches: VoiceEndpoints prompt/LLM statics + SttGate pacing (extractor/speaker strategy),
 V1 TTS multi-character pipeline merge; 0.1.0 tag at phase exit.
