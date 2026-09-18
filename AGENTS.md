@@ -151,3 +151,27 @@ CPU-only with `HIP_VISIBLE_DEVICES="" CUDA_VISIBLE_DEVICES=""` (the ROCm torch b
 (0600, written by hand or `ConfigStore` env seeding: GROQ_API_KEY / OPENROUTER_API_KEY /
 REPLICATE_API_TOKEN). Production TTS is Replicate `lucataco/xtts-v2:<hash>` with a reference WAV
 from the voice library (clean voices: emma-stone.wav, cap-01..12.wav).
+
+## Voice library (phase 2 review, 2026-09-18)
+
+`Benow.Conversation.Voices` ports NASTV's reference-voice import pipeline server-side so the
+desktop app and NASTV (phase 4) share it — previously it lived only in the frontend
+(voiceReference.ts / voiceSampleApi.ts):
+- `VoiceReference` — batch analysis (20ms RMS frames, percentile noise floor, 200ms pause gaps)
+  + best-segment selection (one long stable run preferred; runs concatenated chronologically
+  when no single run is long enough). Pure; unit-tested with synthetic PCM.
+- `VoiceLibrary` — import ANY audio format (ffmpeg decode → analyze → trim → 16 kHz mono 16-bit
+  WAV), record from the mic (FfmpegAudioRecorder), list, delete. Sub-6s references are saved but
+  flagged ("cloned voice may sound robotic") like NASTV.
+- **Library location**: `~/.config/conversation/voices` — USER ASSETS, NEVER committed. The repo
+  `voices/` dir is also gitignored (V1 assets). Verified: `git status` shows no voice files.
+- **Deviation from the TS original (deliberate, 2026-09-18)**: the threshold now caps at half the
+  90th-percentile level. The original's `noiseFloor*4` assumed ≥10% non-speech frames — an
+  ideal reference clip (nearly all speech) computed a threshold ABOVE the speech and detected
+  ZERO runs (a 12s tone in a 13s file → no speech). The cap keeps speech-dense files detectable
+  while silence-only files still yield none.
+- **Lab commands**: `--voices`, `--voice-import <file> [name]`, `--voice-import-dir <dir>`,
+  `--voice-record <name> [sec]`, `--voice-delete <name>`, `--voice <name>` (override for --tts).
+- Migrated 2026-09-18: the 34 NASTV voices (NAS /app/voices) imported into the user library —
+  normalized 16 kHz mono, analyzed, warnings surfaced for short references. Verified by
+  synthesizing with an imported voice through Replicate xtts.

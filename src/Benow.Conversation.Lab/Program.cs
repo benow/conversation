@@ -6,6 +6,7 @@ using Benow.Conversation.Providers;
 using Benow.Conversation.Stt;
 using Benow.Conversation.Tts;
 using Benow.Conversation.Voice;
+using Benow.Conversation.Voices;
 using Microsoft.Extensions.Logging;
 
 // Conversation Lab — the phase-2 headless harness for Benow.Conversation.Core.
@@ -116,9 +117,80 @@ if (Flag("--devices"))
     return 0;
 }
 
+var voicesDir = string.IsNullOrWhiteSpace(config.VoicesDirectory) ? DefaultVoicesDir() : config.VoicesDirectory;
+var library = new VoiceLibrary(loggerFactory.CreateLogger<VoiceLibrary>(), voicesDir,
+    recorder: new FfmpegAudioRecorder(loggerFactory.CreateLogger<FfmpegAudioRecorder>(),
+        new CaptureOptions { Device = config.InputDevice }));
+
+if (Flag("--voices"))
+{
+    var entries = library.List();
+    Console.WriteLine($"Voice library: {voicesDir}  ({entries.Count} voice(s))");
+    foreach (var e in entries)
+        Console.WriteLine($"  {e.Name,-52} {e.DurationSec,6:F1}s  {e.SizeBytes / 1024,6} KB  {e.CreatedAt:yyyy-MM-dd HH:mm}");
+    return 0;
+}
+
+if (Arg("--voice-import") is { } importPath)
+{
+    var importName = argsList.Count > argsList.IndexOf("--voice-import") + 2 ? argsList[argsList.IndexOf("--voice-import") + 2] : null;
+    try
+    {
+        var (entry, analysis) = await library.ImportAsync(importPath, importName);
+        Console.WriteLine($"imported: {entry.Name} ({entry.DurationSec:F1}s, from {analysis.DurationSec:F1}s source, {analysis.SpeechSec:F1}s speech)");
+        foreach (var w in entry.Warnings) Console.WriteLine($"  WARNING: {w}");
+        return 0;
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"import failed: {ex.Message}"); return 1; }
+}
+
+if (Arg("--voice-import-dir") is { } importDir)
+{
+    // Bulk migration (e.g. importing the NASTV library): every audio file in the directory.
+    var html = new[] { ".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".opus", ".wma" };
+    var files = Directory.GetFiles(importDir)
+        .Where(f => html.Contains(Path.GetExtension(f).ToLowerInvariant()))
+        .OrderBy(f => f)
+        .ToList();
+    Console.WriteLine($"[lab] bulk import: {files.Count} file(s) from {importDir} → {voicesDir}");
+    var ok = 0; var failed = 0;
+    foreach (var f in files)
+    {
+        try
+        {
+            var (entry, analysis) = await library.ImportAsync(f);
+            var warn = entry.Warnings.Count > 0 ? $"  ⚠ {string.Join("; ", entry.Warnings)}" : "";
+            Console.WriteLine($"  {entry.Name,-52} {entry.DurationSec,6:F1}s  (src {analysis.DurationSec:F1}s, speech {analysis.SpeechSec:F1}s){warn}");
+            ok++;
+        }
+        catch (Exception ex) { Console.Error.WriteLine($"  FAILED {Path.GetFileName(f)}: {ex.Message}"); failed++; }
+    }
+    Console.WriteLine($"[lab] imported {ok}, failed {failed}");
+    return failed == 0 ? 0 : 1;
+}
+
+if (Arg("--voice-record") is { } recordName)
+{
+    var seconds = argsList.Count > argsList.IndexOf("--voice-record") + 2 && double.TryParse(argsList[argsList.IndexOf("--voice-record") + 2], out var sec) ? sec : 10;
+    try
+    {
+        var (entry, analysis) = await library.RecordAsync(recordName, TimeSpan.FromSeconds(seconds));
+        Console.WriteLine($"recorded: {entry.Name} ({entry.DurationSec:F1}s, {analysis.SpeechSec:F1}s speech)");
+        foreach (var w in entry.Warnings) Console.WriteLine($"  WARNING: {w}");
+        return 0;
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"record failed: {ex.Message}"); return 1; }
+}
+
+if (Arg("--voice-delete") is { } deleteName)
+{
+    return library.Delete(deleteName) ? 0 : 1;
+}
+
 if (Arg("--tts") is { } ttsText)
 {
     var outPath = argsList.Count > argsList.IndexOf("--tts") + 2 ? argsList[argsList.IndexOf("--tts") + 2] : "/tmp/conversation-lab-tts.wav";
+    if (Arg("--voice") is { } voiceOverride) Console.WriteLine($"[lab] using voice '{voiceOverride}'");
     var audio = await tts.SynthesizeAsync(ttsText, CancellationToken.None);
     if (audio == null) { Console.Error.WriteLine("synthesis failed"); return 1; }
     await using var wav = WavWrapper.Wrap(audio.Pcm, audio.SampleRate, 1, 16);
