@@ -21,6 +21,12 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+      # The V1 audio tests exercise the real ffplay binary (process start/pipe/interrupt) —
+      # without it they fail with "No such file or directory" on a bare runner (root-caused
+      # 2026-09-18: every main-branch run was red while the tag publish stayed green). They
+      # assert process mechanics, not audio hardware, so installing ffmpeg is enough.
+      - name: Install ffmpeg (ffplay for the audio-integration tests)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - name: Build + test (full solution)
         run: |
           dotnet build
