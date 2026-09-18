@@ -90,3 +90,36 @@ ParagraphSplitter. CharacterNormalizer/PersonaAllocator stay V1-side (AppSetting
 coupling — seams designed in phase 2 with the service).
 PHASE 1 EXIT (2026-09-17): 0.1.0 tagged; full suite 108 Core + 184 V1 (4 skip baseline) green —
 V1 CLI behavior unchanged. Package on nuget.benow.ca via tag-driven publish-nuget.yml.
+
+## Conversation V2 phase 2 — service + local loop (2026-09-18)
+
+`Benow.Conversation.Core` now carries the runnable engine, not just ports:
+- **Audio** (`Benow.Conversation.Audio`): `PcmPlaybackPipeline` (persistent ffplay fed s16le PCM;
+  orphan sweep, idle restart, broken-pipe restart-retry, interrupt), `SpeechQueue` (serial speak
+  queue over ITtsService; **chunks of one reply enqueue with cancelCurrent:false** — the
+  per-chunk cancel bug was caught by the live e2e run and is regression-tested), `FfmpegAudioRecorder`
+  (cross-platform: Linux pulse / Windows dshow / macOS avfoundation; SIGTERM-then-kill finalize),
+  `AudioDeviceEnumerator` (pactl / ffmpeg -list_devices; monitors filtered).
+- **Stt/**: `WhisperSttClient` — Groq Whisper with WAV wrap, temperature=0, SttGate + 600ms pacing,
+  browser UA, direct HTTPS only.
+- **Llm/**: `ChatClient` — extractor/speaker (W14), raw-LLM when no extractor or UseTools=false,
+  D5 tools-unsupported degradation, empty-pass-2 nudge retry, IToolExecutor seam.
+- **Tts/**: `OpenAiTtsClient` (audio/speech PCM), `ReplicateTtsClient` (xtts cloning; versioned vs
+  versionless URL rule; gate-serialized create+poll; empty-voice auto-pick), `KokoroTtsClient`
+  (local offline server; **run CPU-only**: `HIP_VISIBLE_DEVICES=""` — the ROCm torch build fails
+  with "HIP error: invalid device function" on this GPU).
+- **Engine/**: `ConversationEngine` — frames → VAD → STT (partials + ONE corrected final via
+  full-audio re-transcription) and text → LLM → sentence accumulator → 3-stage pacer → speech queue.
+  **Muted = engine-level skip: the TTS provider is never called** (plan §4.4 contract).
+- **Config/**: `ConfigStore` (JSON at ~/.config/conversation/config.json, atomic write, 0600).
+- **src/Benow.Conversation.Lab**: headless verification harness (`--devices | --tts | --dictate |
+  --converse | --text [--play] [--mute]`).
+
+Verified live 2026-09-18 (laptop, real providers): 14-min dictation via Groq Whisper; full turn
+Groq STT → OpenRouter LLM → Replicate xtts (cloned emma-stone voice) → ffplay with progressive
+pacing (59c first chunk → 336c steady state). Live-run bugs found and fixed: per-chunk speech
+cancellation; `ChannelReader.Count` throws on unbounded+SingleReader channels (explicit counter now).
+
+**Not yet in phase 2**: the ASP.NET WS/SSE host (the desktop app hosts these classes in-proc;
+NASTV-backed mode is phase 5) and NASTV's parallel segment dispatch + pair correction (the
+SttGate serializes provider calls anyway — sequential dispatch is equivalent in practice).
