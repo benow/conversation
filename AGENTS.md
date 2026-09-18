@@ -243,7 +243,17 @@ LLM dominates and varies most) · `stop→first audio` 7.8-24.6s. **The dominant
 LENGTH**: Replicate XTTS costs ~43ms/char to synthesize against ~65ms/char of audio, so a 250-char
 reply is ~11s of synthesis before you hear anything, and a 840-char reply ran the turn to 128s.
 A persona prompt that keeps replies short beats any pipeline tuning; per-chunk look-ahead only
-buys back the gaps. `PrewarmPlayback` was a dead option (documented lever, never wired) — now
+buys back the gaps. Measured (medians, 8s question, same providers):
+
+| configuration | stop→first audio | worst chunk gap | stop→last audio |
+|---|---|---|---|
+| serial synthesis, 841-char reply | 24.6s | 10.3s | 128s |
+| pipelined, 288-char reply | 9.5s | 1.2s | 27.6s |
+| pipelined + brevity prompt, ~100-char reply | 7.5s | none (1 chunk) | 8.0s |
+
+A one-chunk reply cannot stutter, so the brevity prompt buys both speed and seamlessness.
+NOT yet swept (each run spends real provider time): prewarm/warmup off, correction off,
+STT/model variants. `PrewarmPlayback` was a dead option (documented lever, never wired) — now
 wired, worth ~0.5s off the first chunk.
 
 **Test-interference trap**: the V1 `PersistentAudioPipeline` swept EVERY ffplay on the machine
