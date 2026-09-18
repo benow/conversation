@@ -30,6 +30,19 @@ public sealed class MinSpacingPacer
         }
         if (waitMs > 0) await Task.Delay((int)waitMs, ct);
     }
+
+    /// <summary>
+    /// Pushes the next start slot out by <paramref name="extra"/> (adaptive backoff after a
+    /// provider 429). The delay only extends the queue; it never pulls callers earlier.
+    /// </summary>
+    public void Backoff(TimeSpan extra)
+    {
+        lock (_lock)
+        {
+            var candidate = DateTimeOffset.UtcNow.Add(extra);
+            if (candidate > _lastStart) _lastStart = candidate;
+        }
+    }
 }
 
 /// <summary>

@@ -45,6 +45,9 @@ public sealed class FfmpegAudioRecorder : IAudioRecorder
         KillOrphanedProcesses();
     }
 
+    /// <summary>Marker on our ffmpeg command lines — the orphan sweep matches ONLY these.</summary>
+    public const string CaptureMarker = "conversation-capture";
+
     public static CapturePlatform DetectPlatform() =>
         OperatingSystem.IsWindows() ? CapturePlatform.Windows
         : OperatingSystem.IsMacOS() ? CapturePlatform.MacOs
@@ -201,7 +204,9 @@ public sealed class FfmpegAudioRecorder : IAudioRecorder
         };
 
         // 16kHz mono s16le WAV is exactly what the VAD/STT pipeline consumes — no resample step.
-        return $"-y -f {PlatformFormat()} {input} -ac {_options.Channels} -ar {_options.SampleRate} -acodec pcm_s16le \"{outputPath}\"";
+        // The metadata title doubles as our process-list marker for the orphan sweep.
+        return $"-y -f {PlatformFormat()} {input} -ac {_options.Channels} -ar {_options.SampleRate} " +
+               $"-metadata title={CaptureMarker} -acodec pcm_s16le \"{outputPath}\"";
     }
 
     private static void SendTerm(Process process)
@@ -260,7 +265,7 @@ public sealed class FfmpegAudioRecorder : IAudioRecorder
             var psi = new ProcessStartInfo
             {
                 FileName = "pgrep",
-                Arguments = "-f \"ffmpeg.*capture-nastv\"",
+                Arguments = $"-f \"ffmpeg.*{CaptureMarker}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,

@@ -120,6 +120,34 @@ Groq STT → OpenRouter LLM → Replicate xtts (cloned emma-stone voice) → ffp
 pacing (59c first chunk → 336c steady state). Live-run bugs found and fixed: per-chunk speech
 cancellation; `ChannelReader.Count` throws on unbounded+SingleReader channels (explicit counter now).
 
+### Phase-2 live-run findings (2026-09-18, all fixed + regression-tested)
+
+1. **Progressive TTS chunks cancelled each other** — SpeechQueue.Enqueue defaulted to
+   cancelCurrent:true; chunks of ONE reply must queue in sequence (`cancelCurrent:false`), only a
+   new turn cancels. Symptom: only the last chunk was ever heard.
+2. **`ChannelReader.Count` throws** on unbounded channels with SingleReader=true — SpeechQueue
+   tracks queue depth with its own Interlocked counter.
+3. **Full-audio correction TRUNCATED long turns** — the 30s correction window (a NASTV turn
+   constant) replaced the whole assembled transcript with its first 30 seconds; a 5-minute
+   dictation came back as 496 chars. Now: over-cap turns skip correction (keep assembled), and a
+   "correction" under 80% of the assembled length is rejected as a provider hiccup.
+4. **Groq 429s during long dictation dropped segments silently** — 97/154 segments of a 14-minute
+   run were lost. The 600ms gate protects against Cloudflare 403 BURSTS (403) but a continuous
+   dictation exhausts the per-minute audio budget (429). Now: 429 → honor retry-after (≤30s) →
+   retry once → `MinSpacingPacer.Backoff()` so later segments slow down. Verified: 5-min run with
+   23 × 429s → 0 drops, 720 words transcribed (~96% of expected).
+5. **ffplay/ffmpeg orphan sweeps were blanket kills** — they killed EVERY ffplay/ffmpeg on the
+   box (including unrelated players and the other test assembly's processes → parallel-test
+   interference). Now marker-scoped: ffplay carries `-window_title conversation-pcm`, ffmpeg
+   carries `-metadata title=conversation-capture`; sweeps pgrep only their own marker.
+
 **Not yet in phase 2**: the ASP.NET WS/SSE host (the desktop app hosts these classes in-proc;
 NASTV-backed mode is phase 5) and NASTV's parallel segment dispatch + pair correction (the
 SttGate serializes provider calls anyway — sequential dispatch is equivalent in practice).
+
+**Local verification setup (laptop)**: `scripts/kokoro-server.py` from the V1 checkout runs
+CPU-only with `HIP_VISIBLE_DEVICES="" CUDA_VISIBLE_DEVICES=""` (the ROCm torch build fails with
+"HIP error: invalid device function" on this GPU); keys live in `~/.config/conversation/config.json`
+(0600, written by hand or `ConfigStore` env seeding: GROQ_API_KEY / OPENROUTER_API_KEY /
+REPLICATE_API_TOKEN). Production TTS is Replicate `lucataco/xtts-v2:<hash>` with a reference WAV
+from the voice library (clean voices: emma-stone.wav, cap-01..12.wav).

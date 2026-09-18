@@ -63,15 +63,7 @@ public sealed class WhisperSttClient : ITranscriptionService
                 ? "https://api.groq.com/"
                 : string.IsNullOrWhiteSpace(_options.BaseUrl) ? "https://openrouter.ai/api/v1/" : _options.BaseUrl);
 
-            using var content = new MultipartFormDataContent();
-            using var wav = WavWrapper.Wrap(pcm, 16000, 1, 16);
-            var file = new StreamContent(wav);
-            file.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
-            content.Add(file, "file", "segment.wav");
-            content.Add(new StringContent(_options.Model), "model");
-            content.Add(new StringContent("json"), "response_format");
-            content.Add(new StringContent(_options.Language), "language");
-            content.Add(new StringContent("0"), "temperature");
+            using var content = BuildMultipart(pcm);
 
             http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", $"Bearer {_options.ApiKey}");
             http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", LlmProtocol.BrowserUserAgent);
@@ -86,6 +78,37 @@ public sealed class WhisperSttClient : ITranscriptionService
                 // 600ms minimum spacing between request STARTS — held while serialized.
                 await ProviderPacing.SttPacer.EnforceAsync(ct);
                 using var response = await http.PostAsync("openai/v1/audio/transcriptions", content, ct);
+
+                // 429 = a true provider rate limit (per-minute request/audio budget), distinct
+                // from the Cloudflare 403 burst block. A long continuous dictation exhausts
+                // Groq's per-minute audio budget even at 600ms pacing (measured 2026-09-18:
+                // 97/154 segments of a 14-minute run 429'd and were silently dropped). Handle
+                // it: honor retry-after, retry once, and SLOW THE PACER so the rest of the run
+                // adapts instead of hammering.
+                if ((int)response.StatusCode == 429)
+                {
+                    var wait = RetryAfter(response) ?? TimeSpan.FromSeconds(5);
+                    if (wait > TimeSpan.FromSeconds(30)) wait = TimeSpan.FromSeconds(30);
+                    _logger.LogWarning("[stt] seq {Seq}: 429 rate-limited — waiting {Wait:F1}s and retrying once; " +
+                        "pacer backed off so later segments slow down. If this recurs often, the provider's " +
+                        "audio-minutes budget is the limit (raise the tier or dictate less continuously)",
+                        sequence, wait.TotalSeconds);
+                    response.Dispose();
+                    await Task.Delay(wait, ct);
+                    ProviderPacing.SttPacer.Backoff(TimeSpan.FromSeconds(3));
+
+                    await ProviderPacing.SttPacer.EnforceAsync(ct);
+                    using var retry = await http.PostAsync("openai/v1/audio/transcriptions", BuildMultipart(pcm), ct);
+                    if (!retry.IsSuccessStatusCode)
+                    {
+                        var retryBody = await retry.Content.ReadAsStringAsync(ct);
+                        _logger.LogError("[stt] seq {Seq}: retry after 429 also failed ({Status}): {Error} — segment dropped",
+                            sequence, (int)retry.StatusCode, retryBody[..Math.Min(200, retryBody.Length)]);
+                        return null;
+                    }
+                    return await ReadTextAsync(retry, sequence, sw, ct);
+                }
+
                 if (!response.IsSuccessStatusCode)
                 {
                     var body = await response.Content.ReadAsStringAsync(ct);
@@ -104,11 +127,7 @@ public sealed class WhisperSttClient : ITranscriptionService
                     return null;
                 }
 
-                var json = await response.Content.ReadFromJsonAsync<JsonElement>(ct);
-                var text = json.TryGetProperty("text", out var el) ? el.GetString()?.Trim() ?? "" : "";
-                sw.Stop();
-                _logger.LogInformation("[stt] seq {Seq}: \"{Text}\" in {Ms}ms", sequence, text, sw.ElapsedMilliseconds);
-                return string.IsNullOrWhiteSpace(text) ? null : text;
+                return await ReadTextAsync(response, sequence, sw, ct);
             }
             finally
             {
@@ -124,5 +143,43 @@ public sealed class WhisperSttClient : ITranscriptionService
             _logger.LogError(ex, "[stt] seq {Seq}: failed — {Error}. Fix: check network and the STT provider key/model", sequence, ex.Message);
             return null;
         }
+    }
+
+    /// <summary>Fresh multipart content per attempt (HttpContent is single-use).</summary>
+    private MultipartFormDataContent BuildMultipart(byte[] pcm)
+    {
+        var content = new MultipartFormDataContent();
+        var wav = WavWrapper.Wrap(pcm, 16000, 1, 16);
+        var file = new StreamContent(wav);
+        file.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
+        content.Add(file, "file", "segment.wav");
+        content.Add(new StringContent(_options.Model), "model");
+        content.Add(new StringContent("json"), "response_format");
+        content.Add(new StringContent(_options.Language), "language");
+        content.Add(new StringContent("0"), "temperature");
+        return content;
+    }
+
+    private async Task<string?> ReadTextAsync(HttpResponseMessage response, int sequence, System.Diagnostics.Stopwatch sw, CancellationToken ct)
+    {
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>(ct);
+        var text = json.TryGetProperty("text", out var el) ? el.GetString()?.Trim() ?? "" : "";
+        sw.Stop();
+        _logger.LogInformation("[stt] seq {Seq}: \"{Text}\" in {Ms}ms", sequence, text, sw.ElapsedMilliseconds);
+        return string.IsNullOrWhiteSpace(text) ? null : text;
+    }
+
+    /// <summary>Provider-suggested wait (429 retry-after), seconds or HTTP-date. Null when absent/unparseable.</summary>
+    private static TimeSpan? RetryAfter(HttpResponseMessage response)
+    {
+        var ra = response.Headers.RetryAfter;
+        if (ra == null) return null;
+        if (ra.Delta.HasValue) return ra.Delta;
+        if (ra.Date.HasValue)
+        {
+            var delta = ra.Date.Value - DateTimeOffset.UtcNow;
+            return delta > TimeSpan.Zero ? delta : TimeSpan.Zero;
+        }
+        return null;
     }
 }

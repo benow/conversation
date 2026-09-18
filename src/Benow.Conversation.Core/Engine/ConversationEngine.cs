@@ -160,23 +160,45 @@ public sealed class ConversationEngine : IAsyncDisposable
         {
             var capBytes = _options.FullAudioCapSeconds * 16000 * 2;
             var total = _turnSegments.Sum(s => s.Length);
-            var all = new byte[Math.Min(total, capBytes)];
-            var offset = 0;
-            foreach (var seg in _turnSegments)
-            {
-                var take = Math.Min(seg.Length, all.Length - offset);
-                if (take <= 0) break;
-                Array.Copy(seg, 0, all, offset, take);
-                offset += take;
-            }
 
-            var correctedText = await _stt.TranscribeSegmentAsync(all, -1, ct);
-            if (!string.IsNullOrWhiteSpace(correctedText) && correctedText.Length > 0)
+            if (total > capBytes)
             {
-                corrected = !string.Equals(correctedText.Trim(), assembled, StringComparison.Ordinal);
-                final = correctedText.Trim();
-                _logger.LogInformation("[engine] full-audio correction: \"{Corrected}\" (was \"{Assembled}\", changed={Changed})",
-                    Truncate(final), Truncate(assembled), corrected);
+                // The correction pass re-transcribes a BOUNDED window — correct for a spoken
+                // turn (a question), wrong for a long dictation. Never let it truncate: keep
+                // the segment-assembled transcript (caught live 2026-09-18: a 5-minute
+                // dictation was silently reduced to its first 30 seconds).
+                _logger.LogInformation("[engine] turn is {Seconds:F0}s (> {Cap}s correction window) — keeping the assembled transcript, skipping correction",
+                    total / 32000.0, _options.FullAudioCapSeconds);
+            }
+            else
+            {
+                var all = new byte[total];
+                var offset = 0;
+                foreach (var seg in _turnSegments)
+                {
+                    Array.Copy(seg, 0, all, offset, seg.Length);
+                    offset += seg.Length;
+                }
+
+                var correctedText = await _stt.TranscribeSegmentAsync(all, -1, ct);
+                if (!string.IsNullOrWhiteSpace(correctedText))
+                {
+                    var candidate = correctedText.Trim();
+                    // Guardrail: a "correction" that loses a large share of the content is a
+                    // provider hiccup, not a correction — keep the assembled text.
+                    if (assembled.Length > 0 && candidate.Length < assembled.Length * 0.8)
+                    {
+                        _logger.LogWarning("[engine] correction returned {Cand}c vs assembled {Asm}c (<80%) — keeping the assembled transcript",
+                            candidate.Length, assembled.Length);
+                    }
+                    else
+                    {
+                        corrected = !string.Equals(candidate, assembled, StringComparison.Ordinal);
+                        final = candidate;
+                        _logger.LogInformation("[engine] full-audio correction: \"{Corrected}\" (was \"{Assembled}\", changed={Changed})",
+                            Truncate(final), Truncate(assembled), corrected);
+                    }
+                }
             }
         }
 

@@ -187,18 +187,41 @@ public sealed class PcmPlaybackPipeline : IAsyncDisposable
         _stdin = null;
     }
 
+    /// <summary>Marker argument identifying OUR ffplay instances in the process list.</summary>
+    private const string WindowTitle = "conversation-pcm";
+
     private void KillOrphanedProcesses()
     {
         // V1 lesson: a crashed session leaves ffplay holding the audio device; the next start
-        // then fails or plays silence. Sweep at construction (one player per process).
+        // then fails or plays silence. Sweep ONLY our own leftovers (identified by the marker
+        // argument) — the inherited blanket "kill every ffplay" also killed unrelated players
+        // and made parallel test runs interfere (caught 2026-09-18).
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
         try
         {
-            foreach (var proc in Process.GetProcessesByName("ffplay"))
+            var psi = new ProcessStartInfo
             {
+                FileName = "pgrep",
+                Arguments = $"-f \"ffplay.*{WindowTitle}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var pgrep = Process.Start(psi);
+            if (pgrep == null) return;
+            var output = pgrep.StandardOutput.ReadToEnd();
+            pgrep.WaitForExit(3000);
+            if (pgrep.ExitCode != 0 || string.IsNullOrWhiteSpace(output)) return;
+
+            foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (!int.TryParse(line.Trim(), out var pid)) continue;
                 try
                 {
+                    using var proc = Process.GetProcessById(pid);
                     proc.Kill(entireProcessTree: true);
-                    _logger.LogWarning("[playback] killed orphaned ffplay pid={Pid} on startup", proc.Id);
+                    _logger.LogWarning("[playback] killed orphaned ffplay pid={Pid} on startup", pid);
                 }
                 catch { }
             }
@@ -211,7 +234,7 @@ public sealed class PcmPlaybackPipeline : IAsyncDisposable
 
     private string BuildArgs()
     {
-        var args = "-nodisp -loglevel quiet";
+        var args = $"-nodisp -loglevel quiet -window_title {WindowTitle}";
         args += $" -f s16le -ar {_options.SampleRate}";
         if (_options.Channels == 2) args += " -ch_layout stereo";
         if (_options.Volume.HasValue)
