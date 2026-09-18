@@ -55,3 +55,19 @@ dotnet test --filter "GoldenMaster"  # Run regression tests only
 - Keep this file concise. Compress when adding. Remove stale info rather than appending.
 - Prefer references to `docs/` files over inline explanations.
 - After every non-trivial operation (feature, bug fix, refactor), once `dotnet test` passes with 0 failures, run `git add -A && git commit -m "<summary>"`. Never leave tested code uncommitted.
+
+## Conversation V2 phase 1 — core extraction (started 2026-09-17)
+
+Plan: `docs/plans/conversation-v2.md` in the nastv repo. `src/Benow.Conversation.Core` is the
+shared engine (NuGet on nuget.benow.ca — anonymous pull; publish from tags via
+`.github/workflows/publish-nuget.yml`). Ported so far (tranche 1, from NASTV
+`nastv-player-core/Voice/`, namespaces `Benow.Conversation.Voice`): VoiceVAD (energy VAD,
+auto-calibration, sentence-paced segment minimums), SentenceAccumulator + SentenceSegment
+(sentence-boundary flush, run-on cap), TtsChunkPacer (3-stage progressive-TTS pacing),
+WavWrapper (RIFF wrap — NASTV's plugin-side WrapAsWav is a duplicate; collapses in phase 4),
+and the service seams (ITranscriptionService/TranscriptionResult, ITtsService/TtsAudio,
+IVoiceLlmService/ChatTurn). Tests: `tests/Benow.Conversation.Core.Tests` (20, ported from
+nastv-player-core.tests). Dependency ceiling: Logging.Abstractions only.
+Next tranches: providers (IAiProvider + Groq/OpenRouter/Replicate/OpenAI-compatible,
+AiProviderInstances, capability cache), VoiceEndpoints prompt/LLM statics + SttGate pacing,
+V1 TTS multi-character pipeline merge; 0.1.0 tag at phase exit.
