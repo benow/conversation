@@ -109,6 +109,13 @@ public sealed class FfmpegStreamingCapture
 
     private string BuildArgs()
     {
+        // Replay mode: feed a file at its native rate (ffmpeg -re). Used by the Lab's --bench and
+        // by regression runs, so a recorded utterance exercises the REAL capture path
+        // (frame pacing, VAD, streaming STT) instead of a shortcut that bypasses them.
+        if (!string.IsNullOrWhiteSpace(_options.InputFile))
+            return $"-hide_banner -loglevel error -re -i \"{_options.InputFile}\" " +
+                   $"-ac {_options.Channels} -ar {_options.SampleRate} -f s16le -";
+
         var device = _options.Device;
         var input = _platform switch
         {

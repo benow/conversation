@@ -6,6 +6,7 @@ using Benow.Conversation.Providers;
 using Benow.Conversation.Stt;
 using Benow.Conversation.Tts;
 using Benow.Conversation.Voice;
+using Benow.Conversation.Lab;
 using Benow.Conversation.Voices;
 using Microsoft.Extensions.Logging;
 
@@ -96,14 +97,25 @@ var pipeline = new PcmPlaybackPipeline(loggerFactory.CreateLogger<PcmPlaybackPip
 {
     SampleRate = 24000,
     Volume = config.PlaybackVolume,
-    Device = string.IsNullOrWhiteSpace(config.OutputDevice) ? null : config.OutputDevice
+    Device = string.IsNullOrWhiteSpace(config.OutputDevice) ? null : config.OutputDevice,
+    FreshStartWarmupMs = Arg("--warmup") is { } warmArg && int.TryParse(warmArg, out var warmMs) ? warmMs : 500
 });
 var speech = new SpeechQueue(tts, pipeline, loggerFactory.CreateLogger<SpeechQueue>());
 await speech.StartAsync(CancellationToken.None);
 
 await using var engine = new ConversationEngine(
     loggerFactory.CreateLogger<ConversationEngine>(), stt, chat, tts, speech,
-    new EngineOptions { SpeakReplies = Flag("--play") },
+    new EngineOptions
+    {
+        SpeakReplies = Flag("--play") || Flag("--bench"),
+        FullAudioCorrection = !Flag("--no-correction"),
+        PrewarmPlayback = !Flag("--no-prewarm"),
+        Pacer = new TtsChunkPacerOptions
+        {
+            FirstMinChars = Arg("--first") is { } firstArg && int.TryParse(firstArg, out var firstChars) ? firstChars : 40,
+            ParagraphMaxChars = Arg("--para") is { } paraArg && int.TryParse(paraArg, out var paraChars) ? paraChars : 300
+        }
+    },
     voice);
 
 // ---- Modes ----
@@ -221,6 +233,24 @@ if (Arg("--text") is { } text)
     return await RunTurn(text);
 }
 
+if (Arg("--bench") is { } benchPath)
+{
+    return await Bench.RunAsync(new BenchOptions
+    {
+        InputWav = benchPath,
+        Repeats = Arg("--repeat") is { } r && int.TryParse(r, out var rc) ? rc : 2,
+        Label = Arg("--label"),
+        JsonOut = Arg("--out"),
+        Prewarm = !Flag("--no-prewarm"),
+        WarmupMs = Arg("--warmup") is { } w2 && int.TryParse(w2, out var wm2) ? wm2 : 500,
+        Correction = !Flag("--no-correction"),
+        FirstMinChars = Arg("--first") is { } f2 && int.TryParse(f2, out var fm2) ? fm2 : 40,
+        ParagraphMaxChars = Arg("--para") is { } p2 && int.TryParse(p2, out var pm2) ? pm2 : 300,
+        Muted = Flag("--mute"),
+        Speak = true
+    }, engine, speech, loggerFactory);
+}
+
 Console.WriteLine("""
 Conversation Lab — usage:
   --devices                 list input devices
@@ -228,6 +258,9 @@ Conversation Lab — usage:
   --dictate <in.wav>        VAD + STT only
   --converse <in.wav>       STT → LLM → TTS (add --play to hear, --mute to skip TTS)
   --text "<question>"       direct LLM turn
+  --bench <in.wav>          latency experiment: full turn through the real capture path
+                            [--repeat n] [--no-prewarm] [--warmup ms] [--no-correction]
+                            [--first chars] [--para chars] [--mute] [--out results.json]
   [--config path.json]
 """);
 return 0;

@@ -17,6 +17,8 @@ public sealed class SpeechQueue : IAsyncDisposable
 {
     private readonly ITtsService _tts;
     private readonly PcmPlaybackPipeline _pipeline;
+    private long _playbackMs;
+    private volatile bool _inFlight;
     private readonly ILogger<SpeechQueue> _logger;
     private readonly Channel<string> _channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
     private CancellationTokenSource? _currentItemCts;
@@ -32,6 +34,8 @@ public sealed class SpeechQueue : IAsyncDisposable
     public event Action<string, long>? ItemSynthesized;
     /// <summary>Raised when an item's PCM has been handed to the playback pipeline (first mark = first audio out).</summary>
     public event Action<string>? ItemPiped;
+    /// <summary>Fired when a chunk's PCM starts being handed to the player (before the pipe blocks).</summary>
+    public event Action<string, long>? PlaybackStarted;
 
     public SpeechQueue(ITtsService tts, PcmPlaybackPipeline pipeline, ILogger<SpeechQueue> logger)
     {
@@ -41,6 +45,19 @@ public sealed class SpeechQueue : IAsyncDisposable
     }
 
     public int QueuedCount => Volatile.Read(ref _queued);
+
+    /// <summary>
+    /// True when nothing is queued AND nothing is mid-flight (no synthesis, no pipe in progress).
+    /// "QueuedCount == 0" alone is NOT idle: chunks of one reply are enqueued as the LLM streams
+    /// them, so the queue passes through empty between chunks.
+    /// </summary>
+    public bool IsIdle => Volatile.Read(ref _queued) == 0 && !_inFlight;
+
+    /// <summary>
+    /// Starts the playback process before any text exists, so the first chunk does not pay
+    /// process start + audio-device open. Called at session start when prewarming is enabled.
+    /// </summary>
+    public Task PrewarmAsync(CancellationToken ct = default) => _pipeline.PrewarmAsync(ct);
 
     /// <summary>Enqueue text to speak. <paramref name="cancelCurrent"/> interrupts playback in progress.</summary>
     public void Enqueue(string text, bool cancelCurrent = true)
@@ -100,6 +117,7 @@ public sealed class SpeechQueue : IAsyncDisposable
             Interlocked.Decrement(ref _queued);
             using var itemCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdown.Token);
             _currentItemCts = itemCts;
+            _inFlight = true;
             try
             {
                 if (!_tts.IsConfigured)
@@ -121,7 +139,13 @@ public sealed class SpeechQueue : IAsyncDisposable
                 ItemSynthesized?.Invoke(text, sw.ElapsedMilliseconds);
 
                 using var pcm = new MemoryStream(audio.Pcm);
+                // PlaybackStarted fires BEFORE the pipe: PipeAsync blocks while ffplay consumes at
+                // real-time rate, so firing after it reported "first audio" up to a second and a
+                // half late (and made chunk-gap maths nonsense — caught by the Lab's --bench).
+                var playbackSw = Stopwatch.StartNew();
+                PlaybackStarted?.Invoke(text, audio.AudioMs);
                 await _pipeline.PipeAsync(pcm, itemCts.Token);
+                _playbackMs += playbackSw.ElapsedMilliseconds;
                 ItemPiped?.Invoke(text);
                 Spoken?.Invoke(text, audio.AudioMs);
             }
@@ -136,6 +160,7 @@ public sealed class SpeechQueue : IAsyncDisposable
             }
             finally
             {
+                _inFlight = false;
                 _currentItemCts = null;
             }
         }

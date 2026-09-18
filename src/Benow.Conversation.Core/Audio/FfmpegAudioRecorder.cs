@@ -20,6 +20,11 @@ public sealed record CaptureOptions
     public int Channels { get; init; } = 1;
     /// <summary>Explicit platform override (tests); null = detect from OS.</summary>
     public CapturePlatform? Platform { get; init; }
+    /// <summary>
+    /// Replay a file through the streaming capture at its native rate instead of opening a
+    /// device (bench/regression runs). Ignores <see cref="Device"/>.
+    /// </summary>
+    public string InputFile { get; init; } = "";
 }
 
 public enum CapturePlatform { Linux, Windows, MacOs }

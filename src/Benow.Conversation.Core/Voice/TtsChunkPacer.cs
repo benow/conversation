@@ -14,19 +14,21 @@ namespace Benow.Conversation.Voice;
 /// </summary>
 public sealed class TtsChunkPacer
 {
-    /// <summary>First chunk floor: a bare "OK." waits for the next sentence instead of
-    /// synthesizing almost nothing (XTTS quality needs a little text).</summary>
-    private const int FirstMinChars = 40;
-    /// <summary>Rest-of-first-paragraph cap: a wall-of-text paragraph must not delay the
-    /// second chunk indefinitely. 480→300 (2026-08-31): Replicate XTTS synthesis runs
-    /// ~11-16s for 300-400c, so 480c chunks held the next chunk's audio back ~18s.</summary>
-    private const int ParagraphMaxChars = 300;
-    /// <summary>Steady-state batching after the first paragraph (unchanged from the old
-    /// LaterTtsMinChars).</summary>
-    private const int LaterMinChars = 320;
-
+    private readonly TtsChunkPacerOptions _options;
     private readonly StringBuilder _pending = new();
     private int _stage; // 0 = awaiting first chunk, 1 = rest of first paragraph, 2+ = steady state
+
+    public TtsChunkPacer(TtsChunkPacerOptions? options = null) => _options = options ?? new TtsChunkPacerOptions();
+
+    /// <summary>First chunk floor: a bare "OK." waits for the next sentence instead of
+    /// synthesizing almost nothing (XTTS quality needs a little text).</summary>
+    private int FirstMinChars => _options.FirstMinChars;
+    /// <summary>Rest-of-first-paragraph cap: a wall-of-text paragraph must not delay the
+    /// second chunk indefinitely.</summary>
+    private int ParagraphMaxChars => _options.ParagraphMaxChars;
+    /// <summary>Steady-state batching after the first paragraph (unchanged from the old
+    /// LaterTtsMinChars).</summary>
+    private int LaterMinChars => _options.LaterMinChars;
 
     /// <summary>Feed completed sentences; returns the chunk texts that crossed their stage
     /// threshold (0..n per call). Feed segments in stream order.</summary>
@@ -59,4 +61,20 @@ public sealed class TtsChunkPacer
         _pending.Clear();
         return text.Length > 0 ? text : null;
     }
+}
+
+/// <summary>
+/// Pacer thresholds. Defaults are NASTV's proven values (2026-08-29/31 tuning): the FIRST chunk
+/// is the first sentence (fast first audio), the SECOND is the rest of the first paragraph, and
+/// everything after batches at the steady-state threshold. Exposed as options so the trade-off
+/// (smaller first chunk = faster first audio but more provider calls per reply) can be MEASURED
+/// rather than guessed — see the Lab's --bench.
+/// </summary>
+public sealed record TtsChunkPacerOptions
+{
+    public int FirstMinChars { get; init; } = 40;
+    /// <summary>480→300 (2026-08-31): Replicate XTTS runs ~11-16s for 300-400c, so 480c chunks
+    /// held the next chunk's audio back ~18s.</summary>
+    public int ParagraphMaxChars { get; init; } = 300;
+    public int LaterMinChars { get; init; } = 320;
 }

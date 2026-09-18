@@ -59,9 +59,10 @@ public class VoiceVADTests
 
         var segments = vad.DrainClosedSegments();
         Assert.Single(segments);
-        // Segment should contain speech + trailing silence (150 speech + ~10 silence frames).
+        // 25 pre-roll frames (the calibration window, kept as context so an immediate start is
+        // not clipped) + 150 speech + ~10 trailing silence before the breach closes the segment.
         Assert.True(segments[0].Length > 640 * 150);  // at least the speech frames
-        Assert.True(segments[0].Length < 640 * 170);  // but not absurdly long
+        Assert.True(segments[0].Length <= 640 * 190); // context + speech + trailing silence, bounded
     }
 
     [Fact]
@@ -188,5 +189,58 @@ public class VoiceVADTests
             vad.Push(louderSilence);
 
         Assert.Empty(vad.DrainClosedSegments());
+    }
+
+    [Fact]
+    public void Push_SpeechStartingDuringCalibration_KeepsTheOpeningWords()
+    {
+        // Regression (root-caused 2026-09-18 by the Lab's --bench): the 500ms calibration window
+        // was DISCARDED, so a user who spoke immediately lost their opening words — "What is a
+        // good way to keep coffee fresh" reached Whisper as "good way to keep coffee fresh".
+        var vad = new VoiceVAD(NullLogger<VoiceVAD>.Instance);
+
+        // Talk immediately: all 25 calibration frames are speech, then keep going.
+        for (var i = 0; i < 25; i++) vad.Push(SpeechFrame);
+        for (var i = 0; i < 140; i++) vad.Push(SpeechFrame);
+        for (var i = 0; i < 15; i++) vad.Push(SilenceFrame);
+
+        var segments = vad.DrainClosedSegments();
+        Assert.Single(segments);
+        // 25 calibration frames were previously dropped: expect them to be part of the segment.
+        // 25 calibration frames (all speech here) + 140 more + 10 trailing silence.
+        Assert.Equal((25 + 140 + 10) * 640, segments[0].Length);
+    }
+
+    [Fact]
+    public void Push_SpeechAfterSilentCalibration_IncludesAShortPreRoll()
+    {
+        var vad = new VoiceVAD(NullLogger<VoiceVAD>.Instance);
+
+        for (var i = 0; i < 25; i++) vad.Push(SilenceFrame);   // calibration on silence
+        vad.DrainClosedSegments();
+
+        for (var i = 0; i < 150; i++) vad.Push(SpeechFrame);
+        for (var i = 0; i < 15; i++) vad.Push(SilenceFrame);
+
+        var segments = vad.DrainClosedSegments();
+        Assert.Single(segments);
+        // The 500ms of leading silence is prepended as context (bounded: it never accumulates
+        // beyond the pre-roll window), so the onset is not clipped at the threshold crossing.
+        Assert.Equal((25 + 150 + 10) * 640, segments[0].Length);
+    }
+
+    [Fact]
+    public void Push_PreRollIsBounded_SoALongSilenceDoesNotAccumulate()
+    {
+        var vad = new VoiceVAD(NullLogger<VoiceVAD>.Instance);
+
+        for (var i = 0; i < 25; i++) vad.Push(SilenceFrame);
+        for (var i = 0; i < 500; i++) vad.Push(SilenceFrame);   // 10s of silence — must not be kept
+        for (var i = 0; i < 150; i++) vad.Push(SpeechFrame);
+        for (var i = 0; i < 15; i++) vad.Push(SilenceFrame);
+
+        var segments = vad.DrainClosedSegments();
+        Assert.Single(segments);
+        Assert.Equal((25 + 150 + 10) * 640, segments[0].Length);   // never more than the pre-roll window
     }
 }

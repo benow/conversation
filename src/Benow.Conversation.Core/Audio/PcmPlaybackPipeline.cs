@@ -19,6 +19,9 @@ public sealed record PcmPlaybackOptions
     /// <summary>Warmup wait after a fresh ffplay start (its audio device needs a moment). Prewarming at
     /// session start moves this cost off the first-chunk critical path; 0 skips it when prewarmed.</summary>
     public int FreshStartWarmupMs { get; init; } = 500;
+    /// <summary>Start ffplay at session start (before any text exists) so process start and device
+    /// open are already paid for when the first chunk arrives. Measured: see AGENTS.md bench notes.</summary>
+    public bool Prewarm { get; init; } = true;
 }
 
 /// <summary>
@@ -51,6 +54,30 @@ public sealed class PcmPlaybackPipeline : IAsyncDisposable
         await _lock.WaitAsync(ct);
         try { await EnsureProcessAsync(ct); }
         finally { _lock.Release(); }
+    }
+
+    internal async Task PrewarmAsync(CancellationToken ct = default)
+    {
+        if (!_options.Prewarm || _disposed) return;
+        await _lock.WaitAsync(ct);
+        try
+        {
+            var fresh = await EnsureProcessAsync(ct);
+            if (fresh)
+            {
+                var wait = Math.Max(0, Math.Min(_options.FreshStartWarmupMs, 2000));
+                if (wait > 0) await Task.Delay(wait, ct);
+                _logger.LogInformation("[playback] prewarmed ffplay (pid={Pid}, warmup={WarmupMs}ms)", _process?.Id, wait);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[playback] prewarm failed — the first chunk will pay process start: {Error}", ex.Message);
+        }
+        finally
+        {
+            _lock.Release();
+        }
     }
 
     /// <summary>Pipes a PCM stream (s16le, options sample rate/channels) into the player.</summary>

@@ -53,6 +53,8 @@ public sealed record EngineOptions
     public bool SpeakReplies { get; init; } = true;
     /// <summary>Warm the ffplay process at session start so the first chunk doesn't pay process start.</summary>
     public bool PrewarmPlayback { get; init; } = true;
+    /// <summary>TTS chunk pacing thresholds (first-chunk floor / paragraph cap / steady batch).</summary>
+    public Voice.TtsChunkPacerOptions Pacer { get; init; } = new();
 }
 
 /// <summary>
@@ -102,7 +104,8 @@ public sealed class ConversationEngine : IAsyncDisposable
         // Forward speech-queue milestones into the ACTIVE turn timeline (the queue runs on its
         // own thread; the timeline is per-turn and swapped by the caller).
         _speech.ItemSynthesized += (_, ms) => _timeline?.Mark(TurnTimeline.Milestones.FirstTtsSynthDone);
-        _speech.ItemPiped += _ => _timeline?.Mark(TurnTimeline.Milestones.FirstAudioPiped);
+        _speech.PlaybackStarted += (_, _) => _timeline?.Mark(TurnTimeline.Milestones.FirstAudioPiped);
+        _speech.Spoken += (_, _) => _timeline?.MarkAlways(TurnTimeline.Milestones.LastAudioPiped);
     }
 
     /// <summary>Per-turn latency timeline. Set one before a session/turn to have milestones
@@ -138,7 +141,10 @@ public sealed class ConversationEngine : IAsyncDisposable
     /// <summary>Opens a listening session; feed frames with <see cref="PushFrameAsync"/>.</summary>
     public void BeginSession()
     {
+        // Reset per turn: the VAD keeps its learned noise floor, but segment state, the
+        // pre-roll and the first-segment minimum must start fresh for each listening session.
         _vad ??= new VoiceVAD(Microsoft.Extensions.Logging.Abstractions.NullLogger<VoiceVAD>.Instance);
+        _vad.Reset();
         _turnSegments.Clear();
         _partialText.Clear();
         _sessionStartMs = Environment.TickCount64;
@@ -147,6 +153,15 @@ public sealed class ConversationEngine : IAsyncDisposable
         _timeline.Mark(TurnTimeline.Milestones.SessionStart);
         _sink.SessionStarted();
         _logger.LogInformation("[engine] session started (muted={Muted})", Muted);
+
+        // Warm the playback process while the user is still talking — the first chunk then pays
+        // only synthesis, not process start + device open (measured ~0.5s, see AGENTS.md bench).
+        if (_options.PrewarmPlayback && _options.SpeakReplies && !Muted)
+            _ = Task.Run(async () =>
+            {
+                try { await _speech.PrewarmAsync(); }
+                catch (Exception ex) { _logger.LogWarning(ex, "[engine] prewarm failed: {Error}", ex.Message); }
+            });
     }
 
     /// <summary>Feeds one PCM frame (16kHz mono s16le, 640 bytes). VAD closes segments internally.</summary>
@@ -283,7 +298,7 @@ public sealed class ConversationEngine : IAsyncDisposable
         _speech.FlushAndCancel();
 
         var accumulator = new SentenceAccumulator();
-        var pacer = new TtsChunkPacer();
+        var pacer = new TtsChunkPacer(_options.Pacer);
         var spokenText = new StringBuilder();
 
         var result = await _chat.ChatAsync(new ChatRequest

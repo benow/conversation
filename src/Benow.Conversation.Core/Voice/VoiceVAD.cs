@@ -25,10 +25,26 @@ public sealed class VoiceVAD
     private const int LaterSegmentMinBytes = 16000 * 2 * 5;       // 5s minimum for every subsequent one
     private int _closedCount;
     private const int CalibrationFrames = 25;                   // 25 × 20ms = 500ms calibration window
+    // Context kept before a detected onset and prepended to the segment that follows. Without
+    // this the calibration window (first 500ms) was DISCARDED and the ~1 frame before each onset
+    // crossing was dropped, so "What is a good way…" arrived at Whisper as "good way…" — the
+    // opening words of every turn were silently lost whenever speech started immediately
+    // (root-caused 2026-09-18 with the Lab's --bench, which caught the missing words).
+    private const int PreRollFrames = CalibrationFrames;        // 500ms, matches the calibration window
 
     private readonly ILogger<VoiceVAD> _logger;
     private readonly List<byte> _currentSegment = new();
     private readonly Queue<byte[]> _closedSegments = new();
+    private readonly Queue<byte[]> _preRoll = new();
+    /// <summary>RMS of each calibration frame — used to count speech that happened during calibration.</summary>
+    private readonly List<double> _calibrationRms = new();
+    /// <summary>
+    /// Bytes of ACTUAL speech in the open segment. The close/drop thresholds compare against this
+    /// rather than the segment length: the pre-roll adds context frames, and counting them as
+    /// speech made 2.3s bursts close as if they were 2.6s and let sub-100ms clicks survive the
+    /// short-segment guard.
+    /// </summary>
+    private int _speechBytes;
 
     private double _noiseFloor = 200;          // reasonable default before calibration
     private double _threshold;                 // = _noiseFloor * 4
@@ -55,12 +71,16 @@ public sealed class VoiceVAD
     {
         if (frame.Length == 0) return;
 
-        // During calibration (first 500ms), measure ambient noise and don't emit segments.
+        // During calibration (first 500ms), measure ambient noise and don't emit segments yet.
+        // The frames go into the pre-roll rather than being discarded: if the user started
+        // talking immediately, that audio IS the beginning of the turn.
         if (!_calibrated)
         {
-            _calibrationSum += ComputeRms(frame);
+            var rmsCal = ComputeRms(frame);
+            _calibrationSum += rmsCal;
+            _calibrationRms.Add(rmsCal);
             _calibrationFrameCount++;
-            _currentSegment.AddRange(frame.ToArray());
+            PushPreRoll(frame);
 
             if (_calibrationFrameCount >= CalibrationFrames)
             {
@@ -68,11 +88,13 @@ public sealed class VoiceVAD
                 _noiseFloor = Math.Max(50, mean);   // floor at 50 to avoid hypersensitivity
                 _threshold = Math.Min(_noiseFloor * 2.5, 6000);  // cap threshold, phone mics are noisy
                 _calibrated = true;
-                // Discard calibration frames — they're silence and shouldn't be included in speech segments.
-                _currentSegment.Clear();
+                // Speech that happened DURING calibration still counts toward the segment minimum
+                // (the user may have started talking the instant they pressed the key).
+                foreach (var calRms in _calibrationRms)
+                    if (calRms > _threshold) _speechBytes += FrameBytes;
                 _logger.LogInformation(
-                    "[vad] Calibration complete. noiseFloor={NoiseFloor:F0}, threshold={Threshold:F0}",
-                    _noiseFloor, _threshold);
+                    "[vad] Calibration complete. noiseFloor={NoiseFloor:F0}, threshold={Threshold:F0}, speechDuringCalibration={SpeechMs}ms",
+                    _noiseFloor, _threshold, _speechBytes / 32);
             }
             return;
         }
@@ -104,8 +126,12 @@ public sealed class VoiceVAD
             {
                 _state = VadState.Speech;
                 _silenceMs = 0;
+                // Start the segment with the audio that led up to the onset so the first
+                // phoneme is not clipped.
+                while (_preRoll.Count > 0) _currentSegment.AddRange(_preRoll.Dequeue());
             }
             _currentSegment.AddRange(frame.ToArray());
+            _speechBytes += FrameBytes;
         }
         else if (_state == VadState.Speech)
         {
@@ -118,7 +144,7 @@ public sealed class VoiceVAD
                 // Only close if we've accumulated enough speech. The minimum grows after
                 // the first segment (sentence pacing, see constants above); short gaps
                 // before the minimum are just pauses — keep collecting.
-                if (_currentSegment.Count >= MinSegmentBytesFor(_closedCount))
+                if (_speechBytes >= MinSegmentBytesFor(_closedCount))
                 {
                     CloseSegment();
                     _state = VadState.Silence;
@@ -131,6 +157,17 @@ public sealed class VoiceVAD
                 }
             }
         }
+        else
+        {
+            // Confirmed silence — keep it as pre-roll context for the next onset.
+            PushPreRoll(frame);
+        }
+    }
+
+    private void PushPreRoll(ReadOnlySpan<byte> frame)
+    {
+        _preRoll.Enqueue(frame.ToArray());
+        while (_preRoll.Count > PreRollFrames) _preRoll.Dequeue();
     }
 
     /// <summary>
@@ -159,24 +196,43 @@ public sealed class VoiceVAD
     private static int MinSegmentBytesFor(int closedCount) =>
         closedCount == 0 ? FirstSegmentMinBytes : LaterSegmentMinBytes;
 
+    /// <summary>
+    /// Clears per-turn state (segments, pre-roll, speech counter) while KEEPING the learned noise
+    /// floor — re-calibrating on every turn would spend the opening 500ms re-learning a room that
+    /// has not changed. Called at the start of each listening session.
+    /// </summary>
+    public void Reset()
+    {
+        _currentSegment.Clear();
+        _closedSegments.Clear();
+        _preRoll.Clear();
+        _speechBytes = 0;
+        _closedCount = 0;
+        _silenceMs = 0;
+        _state = VadState.Silence;
+    }
+
     private void CloseSegment()
     {
-        if (_currentSegment.Count < MinSpeechBytes)
+        if (_speechBytes < MinSpeechBytes)
         {
             // Drop segments that are too short — Whisper hallucinates on near-empty input.
-            _logger.LogDebug("[vad] Dropping short segment of {Bytes} bytes (below {Min})", _currentSegment.Count, MinSpeechBytes);
+            _logger.LogDebug("[vad] Dropping short segment ({SpeechBytes} bytes of speech, below {Min})", _speechBytes, MinSpeechBytes);
             _currentSegment.Clear();
             _silenceMs = 0;
+            _speechBytes = 0;
             return;
         }
 
         var seg = _currentSegment.ToArray();
+        var speechMs = _speechBytes * FrameMs / FrameBytes;
         _currentSegment.Clear();
         _silenceMs = 0;
+        _speechBytes = 0;
         _closedSegments.Enqueue(seg);
         _closedCount++;
-        _logger.LogInformation("[vad] Segment closed: {Bytes} bytes ({Ms}ms)",
-            seg.Length, seg.Length * FrameMs / FrameBytes);
+        _logger.LogInformation("[vad] Segment closed: {Bytes} bytes ({Ms}ms total, {SpeechMs}ms speech)",
+            seg.Length, seg.Length / (FrameBytes / FrameMs), speechMs);
     }
 
     /// <summary>
