@@ -16,6 +16,9 @@ public sealed record PcmPlaybackOptions
     public string? Device { get; init; }
     /// <summary>Restart ffplay after this much idle time (guards sleep/resume wedges).</summary>
     public TimeSpan IdleRestartThreshold { get; init; } = TimeSpan.FromMinutes(5);
+    /// <summary>Warmup wait after a fresh ffplay start (its audio device needs a moment). Prewarming at
+    /// session start moves this cost off the first-chunk critical path; 0 skips it when prewarmed.</summary>
+    public int FreshStartWarmupMs { get; init; } = 500;
 }
 
 /// <summary>
@@ -65,10 +68,10 @@ public sealed class PcmPlaybackPipeline : IAsyncDisposable
             }
 
             var freshStart = await EnsureProcessAsync(ct);
-            if (freshStart)
+            if (freshStart && _options.FreshStartWarmupMs > 0)
             {
                 // ffplay needs a moment to initialize its audio device before it accepts PCM.
-                await Task.Delay(500, ct);
+                await Task.Delay(_options.FreshStartWarmupMs, ct);
             }
             await pcm.CopyToAsync(_stdin!, ct);
             await _stdin!.FlushAsync(ct);

@@ -28,6 +28,10 @@ public sealed class SpeechQueue : IAsyncDisposable
 
     /// <summary>Raised per completed item: (text, audioMs) — drives per-turn metrics.</summary>
     public event Action<string, long>? Spoken;
+    /// <summary>Raised when an item's synthesis returns: (text, synthMs) — latency instrumentation.</summary>
+    public event Action<string, long>? ItemSynthesized;
+    /// <summary>Raised when an item's PCM has been handed to the playback pipeline (first mark = first audio out).</summary>
+    public event Action<string>? ItemPiped;
 
     public SpeechQueue(ITtsService tts, PcmPlaybackPipeline pipeline, ILogger<SpeechQueue> logger)
     {
@@ -114,9 +118,11 @@ public sealed class SpeechQueue : IAsyncDisposable
 
                 _logger.LogInformation("[speech] synthesized {Chars}c → {Bytes}B @{Rate}Hz in {Ms}ms ({AudioMs}ms audio)",
                     text.Length, audio.Pcm.Length, audio.SampleRate, sw.ElapsedMilliseconds, audio.AudioMs);
+                ItemSynthesized?.Invoke(text, sw.ElapsedMilliseconds);
 
                 using var pcm = new MemoryStream(audio.Pcm);
                 await _pipeline.PipeAsync(pcm, itemCts.Token);
+                ItemPiped?.Invoke(text);
                 Spoken?.Invoke(text, audio.AudioMs);
             }
             catch (OperationCanceledException) when (itemCts.IsCancellationRequested && !ct.IsCancellationRequested)

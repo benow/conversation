@@ -72,9 +72,10 @@ public sealed class ConversationEngine : IAsyncDisposable
     private readonly ChatClient _chat;
     private readonly ITtsService _tts;
     private readonly SpeechQueue _speech;
-    private readonly IConversationEventSink _sink;
+    private readonly SinkRelay _sink = new();
 
     private VoiceVAD? _vad;
+    private TurnTimeline? _timeline;
     private readonly List<byte[]> _turnSegments = new();
     private readonly StringBuilder _partialText = new();
     private readonly SemaphoreSlim _transcribeLock = new(1, 1);
@@ -96,7 +97,31 @@ public sealed class ConversationEngine : IAsyncDisposable
         _tts = tts;
         _speech = speech;
         _options = options ?? new EngineOptions();
-        _sink = sink ?? NullEventSink.Instance;
+        _sink.Target = sink ?? NullEventSink.Instance;
+
+        // Forward speech-queue milestones into the ACTIVE turn timeline (the queue runs on its
+        // own thread; the timeline is per-turn and swapped by the caller).
+        _speech.ItemSynthesized += (_, ms) => _timeline?.Mark(TurnTimeline.Milestones.FirstTtsSynthDone);
+        _speech.ItemPiped += _ => _timeline?.Mark(TurnTimeline.Milestones.FirstAudioPiped);
+    }
+
+    /// <summary>Per-turn latency timeline. Set one before a session/turn to have milestones
+    /// recorded; read it afterwards (the Lab's --bench prints it).</summary>
+    public TurnTimeline? Timeline
+    {
+        get => _timeline;
+        set => _timeline = value;
+    }
+
+    /// <summary>
+    /// The event sink this engine publishes to. Replaceable so a host constructed after the
+    /// engine can attach (see <see cref="SinkRelay"/>); compose with <c>CompositeSink</c> to keep
+    /// an existing sink attached alongside the new one.
+    /// </summary>
+    public IConversationEventSink Sink
+    {
+        get => _sink.Target;
+        set => _sink.Target = value ?? NullEventSink.Instance;
     }
 
     /// <summary>
@@ -118,6 +143,8 @@ public sealed class ConversationEngine : IAsyncDisposable
         _partialText.Clear();
         _sessionStartMs = Environment.TickCount64;
         _turnActive = true;
+        _timeline ??= new TurnTimeline();
+        _timeline.Mark(TurnTimeline.Milestones.SessionStart);
         _sink.SessionStarted();
         _logger.LogInformation("[engine] session started (muted={Muted})", Muted);
     }
@@ -126,6 +153,7 @@ public sealed class ConversationEngine : IAsyncDisposable
     public async Task PushFrameAsync(byte[] frame, CancellationToken ct = default)
     {
         if (_vad == null || !_turnActive) return;
+        _timeline?.Mark(TurnTimeline.Milestones.FirstFrame);
         _vad.Push(frame);
 
         foreach (var segment in _vad.DrainClosedSegments())
@@ -202,6 +230,7 @@ public sealed class ConversationEngine : IAsyncDisposable
             }
         }
 
+        _timeline?.Mark(TurnTimeline.Milestones.FinalTranscript);
         _sink.TranscriptFinal(final, corrected);
         _sink.SessionEnded(Environment.TickCount64 - _sessionStartMs);
         _logger.LogInformation("[engine] session ended: {} segments, {} chars, muted={Muted}",
@@ -216,7 +245,10 @@ public sealed class ConversationEngine : IAsyncDisposable
         try
         {
             var seq = _turnSegments.Count;
+            if (seq == 1) _timeline?.Mark(TurnTimeline.Milestones.FirstSegmentClosed);
+            _timeline?.Mark(TurnTimeline.Milestones.FirstSttStart);
             var text = await _stt.TranscribeSegmentAsync(segment, seq, ct);
+            _timeline?.Mark(TurnTimeline.Milestones.FirstSttDone);
             if (string.IsNullOrWhiteSpace(text))
             {
                 _logger.LogWarning("[engine] segment {Seq} produced no text ({Bytes}B) — leaving a gap in this turn", seq, segment.Length);
@@ -241,6 +273,8 @@ public sealed class ConversationEngine : IAsyncDisposable
     public async Task<ChatResult?> ConverseAsync(string transcript, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(transcript)) return null;
+        _timeline ??= new TurnTimeline();
+        _timeline.Mark(TurnTimeline.Milestones.LlmStart);
         _sink.LlmStarted();
 
         // A new turn barges in over any audio still playing from the previous one — but the
@@ -258,6 +292,7 @@ public sealed class ConversationEngine : IAsyncDisposable
             History = History.Count > 0 ? new List<ChatHistoryMessage>(History) : null
         }, chunk =>
         {
+            _timeline?.Mark(TurnTimeline.Milestones.LlmFirstToken);
             _sink.LlmChunk(chunk);
             spokenText.Append(chunk);
             // Progressive TTS: sentence accumulator → pacer → queue, as sentences complete.
@@ -276,6 +311,7 @@ public sealed class ConversationEngine : IAsyncDisposable
         var tail = pacer.Flush();
         if (tail != null) EnqueueSpeech(tail);
 
+        _timeline?.Mark(TurnTimeline.Milestones.LlmDone);
         if (result != null)
         {
             _sink.LlmFinal(result.Text, result.TotalMs);
@@ -299,6 +335,7 @@ public sealed class ConversationEngine : IAsyncDisposable
             return;
         }
         if (!_options.SpeakReplies) return;
+        _timeline?.Mark(TurnTimeline.Milestones.FirstTtsEnqueue);
         _sink.TtsStarted(text);
         // cancelCurrent: false — chunks of one reply play in sequence (progressive TTS).
         _speech.Enqueue(text, cancelCurrent: false);

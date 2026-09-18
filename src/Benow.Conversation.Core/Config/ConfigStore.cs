@@ -47,6 +47,14 @@ public sealed class ConversationConfig : ILegacyProviderConfig
     public string InputDevice { get; set; } = "";
     public string OutputDevice { get; set; } = "";
     public int PlaybackVolume { get; set; } = 100;
+
+    // ---- Desktop session state (persisted so a restart resumes the same posture) ----
+    /// <summary>Engine-level TTS mute: true = replies are never synthesized (no spend, no latency).</summary>
+    public bool Muted { get; set; }
+    /// <summary>Global hotkey bindings (Speak/Converse/Interrupt, plus media-key triggers).</summary>
+    public Input.HotkeyConfig Hotkeys { get; set; } = new();
+    /// <summary>Last persona selected in the tray; restored at startup.</summary>
+    public string ActivePersona { get; set; } = Personas.PersonaStore.DefaultName;
 }
 
 /// <summary>
@@ -89,8 +97,9 @@ public sealed class ConfigStore
         File.Move(tmp, FilePath, overwrite: true);
         try
         {
-            // Keep keys as private as the OS allows (no-op where unsupported).
-            File.SetUnixFileMode(FilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            // Keep keys as private as the OS allows (Windows has no unix mode; ACLs inherit from the profile dir).
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(FilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         }
         catch { }
     }

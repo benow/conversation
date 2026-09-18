@@ -1,0 +1,50 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Benow.Conversation.Desktop.ConverseOverlay"
+        Title="Conversation"
+        Width="620" Height="360"
+        MinWidth="420" MinHeight="240"
+        WindowStartupLocation="CenterScreen"
+        Topmost="True"
+        ShowInTaskbar="True"
+        Background="#12141a">
+  <Grid RowDefinitions="Auto,*,Auto,Auto,Auto" Margin="16">
+    <!-- Header: persona + live status + mute -->
+    <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto" Margin="0,0,0,10">
+      <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+        <TextBlock Text="Persona" Foreground="#9aa1ad" VerticalAlignment="Center"/>
+        <ComboBox x:Name="PersonaBox" Width="200" PlaceholderText="Default"/>
+        <TextBlock x:Name="StatusText" Text="idle" Foreground="#5aa9e6" VerticalAlignment="Center"/>
+      </StackPanel>
+      <Button Grid.Column="1" x:Name="MuteButton" Content="Mute" Margin="0,0,8,0"/>
+      <Button Grid.Column="2" x:Name="InterruptButton" Content="Interrupt"/>
+    </Grid>
+
+    <!-- Conversation text -->
+    <Border Grid.Row="1" Background="#181b22" CornerRadius="8" Padding="12">
+      <ScrollViewer x:Name="Scroller">
+        <SelectableTextBlock x:Name="Transcript" TextWrapping="Wrap" Foreground="#e6e8ec"
+                             FontSize="15" LineHeight="22" Text=""/>
+      </ScrollViewer>
+    </Border>
+
+    <!-- Typed input: same turn path as voice (plan §4.4) -->
+    <Grid Grid.Row="2" ColumnDefinitions="*,Auto" Margin="0,10,0,0">
+      <TextBox Grid.Column="0" x:Name="InputBox" PlaceholderText="Type a message (Enter to send)…"/>
+      <Button Grid.Column="1" x:Name="SendButton" Content="Send" Margin="8,0,0,0"/>
+    </Grid>
+
+    <!-- Actions -->
+    <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8" Margin="0,10,0,0">
+      <Button x:Name="SpeakButton" Content="Speak (dictate)"/>
+      <Button x:Name="ConverseButton" Content="Converse (talk)"/>
+      <Button x:Name="ReplayButton" Content="Replay last"/>
+      <Button x:Name="SettingsButton" Content="Settings…"/>
+    </StackPanel>
+
+    <!-- Hint on its own row: side-by-side with the buttons it clipped at the default width. -->
+    <TextBlock Grid.Row="4" x:Name="HintText" Foreground="#6d7480" FontSize="12"
+               TextWrapping="Wrap" Margin="0,8,0,0"
+               Text="Ctrl+Space speak · Ctrl+Shift+Space converse · media keys work from a Bluetooth earbud"/>
+  </Grid>
+</Window>

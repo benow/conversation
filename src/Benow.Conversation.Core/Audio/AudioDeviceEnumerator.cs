@@ -32,7 +32,7 @@ public sealed class AudioDeviceEnumerator
         {
             if (OperatingSystem.IsWindows()) return ListViaFfmpegAsync("dshow", ct);
             if (OperatingSystem.IsMacOS()) return ListViaFfmpegAsync("avfoundation", ct);
-            return ListPulseAsync(ct);
+            return ListPulseAsync(ct, "sources");
         }
         catch (Exception ex)
         {
@@ -41,9 +41,29 @@ public sealed class AudioDeviceEnumerator
         }
     }
 
-    private async Task<IReadOnlyList<AudioDevice>> ListPulseAsync(CancellationToken ct)
+    /// <summary>
+    /// Playback devices for the output menu. The Id is an ffplay `-audiodevice` value, which on
+    /// Linux is a sink name — the same pulse name space as a source, so the list comes from
+    /// `pactl list short sinks`.
+    /// </summary>
+    public Task<IReadOnlyList<AudioDevice>> ListOutputsAsync(CancellationToken ct)
     {
-        var output = await RunAsync("pactl", "list short sources", ct);
+        try
+        {
+            if (OperatingSystem.IsWindows()) return ListViaFfmpegAsync("dshow", ct);
+            if (OperatingSystem.IsMacOS()) return ListViaFfmpegAsync("avfoundation", ct);
+            return ListPulseAsync(ct, "sinks");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[devices] output enumeration failed — showing system default only");
+            return Task.FromResult<IReadOnlyList<AudioDevice>>(Array.Empty<AudioDevice>());
+        }
+    }
+
+    private async Task<IReadOnlyList<AudioDevice>> ListPulseAsync(CancellationToken ct, string kind)
+    {
+        var output = await RunAsync("pactl", $"list short {kind}", ct);
         var devices = new List<AudioDevice>();
         foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
@@ -52,11 +72,11 @@ public sealed class AudioDeviceEnumerator
             if (cols.Length < 2) continue;
             var name = cols[1].Trim();
             if (name.Length == 0) continue;
-            // Skip monitor sources (loopback of the output, never a useful mic).
+            // Skip monitor sources (loopback of the output, never a useful mic). Sinks have no monitors.
             if (name.Contains(".monitor", StringComparison.Ordinal)) continue;
             devices.Add(new AudioDevice(name, Beautify(name)));
         }
-        _logger.LogInformation("[devices] {Count} PulseAudio input source(s)", devices.Count);
+        _logger.LogInformation("[devices] {Count} PulseAudio {Kind}", devices.Count, kind);
         return devices;
     }
 

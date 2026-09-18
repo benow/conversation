@@ -24,3 +24,6 @@ voices/
 tests/**/fixtures/*.pending
 .venv*/dist/
 .venv-f5tts/
+
+# NuGet package output
+dist/

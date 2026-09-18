@@ -78,6 +78,16 @@ public sealed class ChatClient
         _tools = tools;
     }
 
+    /// <summary>
+    /// Called when a turn fails in a way that produces no reply (unreachable provider, rejected
+    /// key, refused model). Without this the failure is only a log line and the caller sees an
+    /// empty result — which reads as "the assistant had nothing to say" instead of "it broke".
+    ///
+    /// Settable rather than a constructor option because the sink that reports to the UI attaches
+    /// after this client is built; a captured sink would go stale the moment a host attached.
+    /// </summary>
+    public Action<string>? OnError { get; set; }
+
     public async Task<ChatResult?> ChatAsync(ChatRequest request, Action<string>? onChunk, CancellationToken ct)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -118,6 +128,7 @@ public sealed class ChatClient
         catch (Exception ex)
         {
             _logger.LogError(ex, "[llm] turn failed — {Error}. Fix: check the LLM provider key/model and network", ex.Message);
+            OnError?.Invoke($"provider call failed: {ex.Message}");
             return null;
         }
     }
@@ -308,6 +319,7 @@ public sealed class ChatClient
             var err = await response.Content.ReadAsStringAsync(ct);
             _logger.LogError("[llm] speaker pass failed {Status}: {Error}. Fix: check model '{Model}' and the API key",
                 (int)response.StatusCode, err[..Math.Min(300, err.Length)], model);
+            OnError?.Invoke($"speaker pass {Describe((int)response.StatusCode)}: {Clip(err)}");
             return (0, "");
         }
 
@@ -364,4 +376,17 @@ public sealed class ChatClient
 
     private static ChatResult Finish(int chunks, string text, System.Diagnostics.Stopwatch sw, long extractorMs, long speakerMs, bool usedTools)
         => new(text, chunks, sw.ElapsedMilliseconds, extractorMs, speakerMs, usedTools);
+
+    /// <summary>Turns an HTTP status into a phrase that names the likely fix.</summary>
+    private static string Describe(int status) => status switch
+    {
+        401 or 403 => $"{status} — the API key was rejected (check the key in Settings)",
+        404 => "404 — the model id does not exist for this provider",
+        429 => "429 — rate limited (retry shortly, or pick a less busy model)",
+        _ => status.ToString()
+    };
+
+    /// <summary>Provider error bodies are JSON/HTML blobs; keep the surfaced message short.</summary>
+    private static string Clip(string body) =>
+        body.Length <= 200 ? body : body[..200] + "…";
 }

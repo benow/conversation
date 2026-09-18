@@ -175,3 +175,35 @@ desktop app and NASTV (phase 4) share it — previously it lived only in the fro
 - Migrated 2026-09-18: the 34 NASTV voices (NAS /app/voices) imported into the user library —
   normalized 16 kHz mono, analyzed, warnings surfaced for short references. Verified by
   synthesizing with an imported voice through Replicate xtts.
+
+## Desktop app (phase 3, 2026-09-18)
+
+`src/Benow.Conversation.Desktop` (Avalonia 12.1.2) is the tray-first shell; `Program.cs` is the
+composition root and `DesktopHost` is the toolkit-free brain (all decision logic, unit-tested).
+
+- **One engine, two verbs** — `Speak` (voice → transcript → clipboard + synthesized Ctrl+V into
+  the focused app) and `Converse` (voice or typed text → LLM → streaming text + TTS). A persona
+  switch applies the bundle (prompt + speaker model + TTS engine + voice) via `PersonaBinding`
+  and clears history; STT and the extractor model are deliberately persona-agnostic.
+- **`--show`** opens the Converse overlay at startup. Needed because GNOME only shows tray icons
+  with the AppIndicator extension LOADED (installed ≠ loaded: enabling it takes effect at the
+  next shell start). Hotkeys work regardless — they read `/dev/input` via evdev, not the shell.
+- **The host attaches its own event sink**: the engine publishes through `SinkRelay` (replaceable)
+  and a late-attaching host wraps whatever is already there in a `CompositeSink`. A sink that is
+  not attached fails invisibly — the overlay just stays empty — so the host attaches it itself
+  rather than trusting the wiring order. `ChatClient.OnError` is a settable property for the same
+  reason: a sink captured at construction goes stale when the UI attaches later.
+- **Provider failures are surfaced, not swallowed**: `ChatClient` reports unreachable providers /
+  rejected keys through `OnError` → engine sink → overlay status `error`. Previously a failed turn
+  returned an empty result, which the UI showed as "no reply" — indistinguishable from a model
+  that had nothing to say.
+- **Settings are browser-served** from a loopback listener (`SettingsHost`, port 8791): page +
+  JSON API for config/devices/voices/personas. Provider keys are write-only (presence flags only,
+  an empty field means "leave the stored key alone"). The page can speak a test phrase.
+- **Tray menu is a pure model** (`TrayModel`) mapped onto `NativeMenuItem`s — that is what makes
+  the menu testable without a windowing system (`TrayMenuRenderingTests` renders it headless).
+- **Verification**: `dotnet test benow-conversation.slnx` (345 tests: 120 Core + 41 Desktop +
+  184 V1/4 skipped). This box has NO screenshot tool — render the UI offscreen instead: an
+  Avalonia headless harness (`Avalonia.Headless` + `.UseSkia()`, `UseHeadlessDrawing = false`)
+  can build `ConverseOverlay`, drive host state, and `CaptureRenderedFrame().Save(png)`; inspect
+  the PNG with the visor MCP. Two real layout bugs were found only this way (clipped hint text).

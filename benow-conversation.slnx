@@ -3,9 +3,11 @@
     <Project Path="src/Benow.Conversation.Core/Benow.Conversation.Core.csproj" />
     <Project Path="src/benow-conversation/benow-conversation.csproj" />
     <Project Path="src/Benow.Conversation.Lab/Benow.Conversation.Lab.csproj" />
+    <Project Path="src/Benow.Conversation.Desktop/Benow.Conversation.Desktop.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Benow.Conversation.Core.Tests/Benow.Conversation.Core.Tests.csproj" />
     <Project Path="tests/benow-conversation.Tests/benow-conversation.Tests.csproj" />
+    <Project Path="tests/Benow.Conversation.Desktop.Tests/Benow.Conversation.Desktop.Tests.csproj" />
   </Folder>
 </Solution>
