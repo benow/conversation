@@ -33,7 +33,7 @@ public sealed class SpeechQueue : IAsyncDisposable
     private readonly IAudioOut _audioOut;
     private long _playbackMs;
     private volatile bool _inFlight;
-    private readonly ILogger<SpeechQueue> _logger;
+    private readonly ILogger _logger;
     private readonly Channel<string> _channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Channel<SynthesizedAudio> _ready =
         Channel.CreateBounded<SynthesizedAudio>(new BoundedChannelOptions(LookAheadChunks) { SingleReader = true, SingleWriter = true });
@@ -69,7 +69,9 @@ public sealed class SpeechQueue : IAsyncDisposable
     /// Silence where the user expected words — hosts should count and surface it.</summary>
     public event Action<string>? ItemDropped;
 
-    public SpeechQueue(ITtsService tts, IAudioOut audioOut, ILogger<SpeechQueue> logger)
+    /// <summary>Plain ILogger (not ILogger{SpeechQueue}): hosts embedding the queue already hold
+    /// their own typed logger; forcing an adapter just to log is hostility, not safety.</summary>
+    public SpeechQueue(ITtsService tts, IAudioOut audioOut, ILogger logger)
     {
         _tts = tts;
         _audioOut = audioOut;
