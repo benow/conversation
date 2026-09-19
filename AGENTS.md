@@ -292,3 +292,18 @@ fully-dropped turn still drains — regression-tested; a host waiting on Drained
 Publish flow: bump Version in the Core csproj → commit → tag vX.Y.Z → push both → CI publishes to
 nuget.benow.ca. NOTE: NuGet's client HTTP cache holds package indexes ~30 min — a just-published
 version needs `dotnet restore --no-http-cache` to be seen immediately.
+
+## Adaptive TTS chunk growth (0.5.4, 2026-09-19) — the "pause after the first line" fix
+
+Live on the TV, the user heard: first line plays, LONG pause, then the rest arrives in a burst.
+Diagnosis: chunk 1 is one sentence (~60c ≈ 4s of audio) while the old fixed stage 2 batched up
+to 300c (~13s synthesis) — the audio ran dry before chunk 2 existed. A chunk can only gap when
+its synthesis outlasts the previous chunk's AUDIO; Replicate synthesizes (~43ms/char) faster
+than it plays (~65ms/char), so the pacer now grows each chunk's threshold from the previous
+chunk's ACTUAL length (×GrowthFactor=1.4, clamp [40, 320]): synthesis of chunk N+1 always fits
+inside chunk N's playback, and sizes amortize up to the cap. Paragraph breaks still fire early.
+Strict 1.5 (perfect no-gap) is impossible because sentences arrive WHOLE — uniform sentences
+overshoot any threshold (the exact worst case is 2.0×); tested bound is ≤2.05× per step (worst
+gap ~2s instead of 10s+). Knobs: TtsChunkPacerOptions { FirstMinChars, GrowthFactor, MaxChars }
+— GrowthFactor up to ~1.5 trades smoothness for fewer provider calls; above that gaps return.
+NASTV picks this up via the package (parameterless `new TtsChunkPacer()`).
