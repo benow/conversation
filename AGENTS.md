@@ -259,3 +259,22 @@ wired, worth ~0.5s off the first chunk.
 **Test-interference trap**: the V1 `PersistentAudioPipeline` swept EVERY ffplay on the machine
 (`GetProcessesByName`) — it killed V2's prewarmed player mid-pipe and hung the solution test run.
 Both are marker-scoped now (`conversation-pcm` / `conversation-v1-pcm`); keep them that way.
+
+## Desktop bootstrap + verification notes (2026-09-19)
+
+- **Tray prerequisite is self-inflicted on GNOME**: AppIndicator is installed-but-disabled by
+  default. Until there is an installer (deliberately deferred), the app should handle it at
+  startup: if Linux+GNOME and `gnome-extensions info ubuntu-appindicators@ubuntu.com` shows
+  installed-but-not-enabled → `gnome-extensions enable` (user-level, no root) + a `notify-send`
+  note that the tray appears after re-login. That closes the "who tells the user to start it"
+  loop: first launch is however they got the binary; from then on it can offer "start at login"
+  (write `~/.config/autostart/conversation.desktop`). NOT YET IMPLEMENTED — planned.
+- **Real-display pixel capture is blocked by GNOME policy**: Shell's Screenshot D-Bus API is
+  AccessDenied (GNOME 41+), gnome-screenshot's X11 fallback captures nothing on Wayland, and
+  x11grab reads XWayland's never-composited root (black). The portal needs an interactive consent
+  click. What DOES verify the real desktop: `xwininfo -tree` (window mapped/geometry),
+  `busctl get-property org.kde.StatusNotifierWatcher ... RegisteredStatusNotifierItems` (tray
+  registered), `GetLayout` on the item's `/net/avaloniaui/dbusmenu/<id>` path (real menu labels —
+  all 19 items verified), and Playwright + screenshot + vision for the settings page. The Avalonia
+  headless renderer covers overlay pixels. gnome-screenshot is now installed but is a dead end on
+  Wayland; don't reach for it again.

@@ -12,6 +12,7 @@ internal static class SettingsPage
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='7' fill='%23e6a95a'/%3E%3Ccircle cx='10' cy='16' r='2.5' fill='%2316181d'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%2316181d'/%3E%3Ccircle cx='22' cy='16' r='2.5' fill='%2316181d'/%3E%3C/svg%3E">
 <title>Conversation — Settings</title>
 <style>
   :root { color-scheme: dark; --bg:#16181d; --card:#1e2128; --fg:#e6e8ec; --dim:#9aa1ad; --acc:#5aa9e6; --ok:#4fbf7a; --err:#e06c75; }
@@ -150,7 +151,7 @@ async function load() {
   const v = await api('/api/voices');
   $('voiceDir').textContent = v.directory;
   $('voiceList').innerHTML = v.voices.length
-    ? v.voices.map(n => `<li><span>${n}</span></li>`).join('')
+    ? v.voices.map(x => `<li><span>${x.name}</span></li>`).join('')
     : '<li><span class="err">no voices yet — import or record in the app</span></li>';
 
   const p = await api('/api/personas');

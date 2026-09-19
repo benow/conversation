@@ -127,3 +127,38 @@ tests/benow-conversation.Tests/
 ```sh
 dotnet test tests/benow-conversation.Tests
 ```
+
+## Desktop app (`conversation`)
+
+The tray-first desktop app lives in `src/Benow.Conversation.Desktop`. Build:
+
+```bash
+dotnet build src/Benow.Conversation.Desktop/Benow.Conversation.Desktop.csproj -c Release
+```
+
+Run: `conversation` (or `dotnet run --project src/Benow.Conversation.Desktop`).
+
+- **Speak** (default Ctrl+Space, or the earbud play/pause key): dictate — the transcript is
+  pasted into whatever app has focus.
+- **Converse** (default Ctrl+Shift+Space, or the earbud next-track key): talk to the assistant;
+  replies stream as text in the overlay and are spoken unless muted.
+- Settings open at **http://127.0.0.1:8791** (the tray menu has a link; the app tries to open
+  your browser). Provider keys, devices, personas and voices are all configured there.
+
+### Linux tray (GNOME)
+
+The app lives in the system tray. GNOME shows tray icons only with the AppIndicator extension
+LOADED — Ubuntu ships it installed but often disabled. Enable it once, then re-login:
+
+```bash
+gnome-extensions enable ubuntu-appindicators@ubuntu.com
+# log out and back in (the extension loads at shell start)
+```
+
+Until you re-login, run `conversation --show` to open the overlay window directly — everything
+except the tray menu is reachable from it, and hotkeys work regardless of the tray.
+
+Other useful flags: `--no-ui` (services without a display), `--settings` (print the settings
+URL), `--config <path>`, `--verbose`. Logs: `~/.local/state/conversation/logs/`.
+
+On other desktops (Windows, KDE, …) the tray works out of the box.
