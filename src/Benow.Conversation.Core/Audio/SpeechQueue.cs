@@ -46,7 +46,7 @@ public sealed class SpeechQueue : IAsyncDisposable
     private int _queued;
 
     /// <summary>A synthesized chunk waiting for its turn to play. Public: the sink receives it.</summary>
-    public sealed record SynthesizedAudio(string Text, byte[] Pcm, long AudioMs, long SynthMs);
+    public sealed record SynthesizedAudio(string Text, byte[] Pcm, long AudioMs, long SynthMs, string? FallbackMessage = null);
 
     /// <summary>Raised per completed item: (text, audioMs) — drives per-turn metrics.</summary>
     public event Action<string, long>? Spoken;
@@ -56,6 +56,15 @@ public sealed class SpeechQueue : IAsyncDisposable
     public event Action<string>? ItemPiped;
     /// <summary>Fired when a chunk's PCM starts being handed to the sink (before the play call blocks).</summary>
     public event Action<string, long>? PlaybackStarted;
+    /// <summary>
+    /// A chunk was synthesized only via a provider/model-mismatch fallback (TtsAudio.FallbackMessage).
+    /// The user MUST know the configured TTS engine is not the one speaking — hosts surface this as
+    /// a toast/toast-equivalent, never silently.
+    /// </summary>
+    public event Action<string>? FallbackRaised;
+    /// <summary>Raised once after the queue empties and the last chunk finishes playing (turn's
+    /// audio is fully delivered). Always fires — hosts use it to release client audio sessions.</summary>
+    public event Action? Drained;
 
     public SpeechQueue(ITtsService tts, IAudioOut audioOut, ILogger<SpeechQueue> logger)
     {
@@ -164,10 +173,11 @@ public sealed class SpeechQueue : IAsyncDisposable
                 _logger.LogInformation("[speech] synthesized {Chars}c → {Bytes}B @{Rate}Hz in {Ms}ms ({AudioMs}ms audio)",
                     text.Length, audio.Pcm.Length, audio.SampleRate, sw.ElapsedMilliseconds, audio.AudioMs);
                 ItemSynthesized?.Invoke(text, sw.ElapsedMilliseconds);
+                if (!string.IsNullOrWhiteSpace(audio.FallbackMessage)) FallbackRaised?.Invoke(audio.FallbackMessage);
 
                 // Bounded: at most LookAheadChunks wait here, so a cancelled turn cannot leave a
                 // long tail of stale synthesized audio behind (FlushAndCancel empties this).
-                await _ready.Writer.WriteAsync(new SynthesizedAudio(text, audio.Pcm, audio.AudioMs, sw.ElapsedMilliseconds), itemCts.Token);
+                await _ready.Writer.WriteAsync(new SynthesizedAudio(text, audio.Pcm, audio.AudioMs, sw.ElapsedMilliseconds, audio.FallbackMessage), itemCts.Token);
             }
             catch (OperationCanceledException) when (itemCts.IsCancellationRequested && !ct.IsCancellationRequested)
             {
@@ -182,6 +192,7 @@ public sealed class SpeechQueue : IAsyncDisposable
             {
                 _inFlight = false;
                 _currentItemCts = null;
+                SignalDrainedIfIdle();
             }
         }
     }
@@ -203,6 +214,7 @@ public sealed class SpeechQueue : IAsyncDisposable
                 _playbackMs += playbackSw.ElapsedMilliseconds;
                 ItemPiped?.Invoke(item.Text);
                 Spoken?.Invoke(item.Text, item.AudioMs);
+                SignalDrainedIfIdle();
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -211,8 +223,18 @@ public sealed class SpeechQueue : IAsyncDisposable
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[speech] playback failed ({Chars}c): {Error}", item.Text.Length, ex.Message);
+                SignalDrainedIfIdle();
             }
         }
+    }
+
+    /// <summary>Fires <see cref="Drained"/> when nothing is queued, nothing is in flight, and the
+    /// look-ahead is empty. Called on every stage's item boundary so DROPPED chunks still end the
+    /// turn — a host waiting for Drained (client audio-session release) must not hang.</summary>
+    private void SignalDrainedIfIdle()
+    {
+        if (Volatile.Read(ref _queued) != 0 || _inFlight || _ready.Reader.Count != 0) return;
+        Drained?.Invoke();
     }
 
     public async ValueTask DisposeAsync()

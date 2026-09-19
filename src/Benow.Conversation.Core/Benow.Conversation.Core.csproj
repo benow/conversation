@@ -7,7 +7,7 @@
     <!-- Phase 3 complete (docs/plans/conversation-v2.md in the nastv repo): + personas, settings
          host, streaming capture, TurnTimeline, the fixed VAD (pre-roll), pipelined speech queue.
          0.5.0 adds the IAudioOut playback seam so NASTV can host the same speech queue with a SignalR sink (plan §4.5, "no duplicated functionality"). Tags drive CI publishes. -->
-    <Version>0.5.0</Version>
+    <Version>0.5.1</Version>
     <PackageId>Benow.Conversation.Core</PackageId>
     <Authors>benow</Authors>
     <Description>Shared conversation engine core: voice pipeline (VAD, segment dispatch, progressive TTS), AI providers (STT/LLM/TTS), LLM strategy, capture, and configuration. Consumed by the Conversation desktop app and NASTV.</Description>

@@ -51,4 +51,102 @@ public class SpeechQueueTests
         }
         await queue.StopAsync();
     }
+
+    /// <summary>A sink that does nothing instantly (no ffplay) — for lifecycle assertions.</summary>
+    private sealed class NullAudioOut : IAudioOut
+    {
+        public List<SpeechQueue.SynthesizedAudio> Played { get; } = new();
+        public Task PlayAsync(SpeechQueue.SynthesizedAudio chunk, CancellationToken ct)
+        {
+            lock (Played) Played.Add(chunk);
+            return Task.CompletedTask;
+        }
+        public Task ResetAsync() => Task.CompletedTask;
+    }
+
+    private sealed class NullTts : ITtsService
+    {
+        public bool IsConfigured => true;
+        public Task<TtsAudio?> SynthesizeAsync(string text, CancellationToken ct) =>
+            Task.FromResult<TtsAudio?>(new TtsAudio(new byte[4800], 24000));
+    }
+
+    private sealed class FailingTts : ITtsService
+    {
+        public bool IsConfigured => true;
+        public Task<TtsAudio?> SynthesizeAsync(string text, CancellationToken ct) => Task.FromResult<TtsAudio?>(null);
+    }
+
+    [Fact]
+    public async Task Drained_FiresAfterTheLastChunkPlays_ExactlyOnce()
+    {
+        var outSink = new NullAudioOut();
+        var drained = new List<DateTime>();
+        await using var queue = new SpeechQueue(new NullTts(), outSink, NullLogger<SpeechQueue>.Instance);
+        queue.Drained += () => { lock (drained) drained.Add(DateTime.UtcNow); };
+        await queue.StartAsync(CancellationToken.None);
+
+        queue.Enqueue("a.", cancelCurrent: false);
+        queue.Enqueue("b.", cancelCurrent: false);
+
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (drained) if (drained.Count > 0) break;
+            await Task.Delay(50);
+        }
+
+        lock (outSink.Played) Assert.Equal(2, outSink.Played.Count);
+        lock (drained) Assert.Single(drained);   // one turn, one drained signal
+        await queue.StopAsync();
+    }
+
+    [Fact]
+    public async Task Drained_FiresEvenWhenSynthesisDropsEveryChunk()
+    {
+        // A turn whose chunks ALL fail to synthesize must still emit Drained — a host waiting
+        // for it (client audio-session release) must never hang on a fully-dropped turn.
+        var drained = new List<DateTime>();
+        await using var queue = new SpeechQueue(new FailingTts(), new NullAudioOut(), NullLogger<SpeechQueue>.Instance);
+        queue.Drained += () => { lock (drained) drained.Add(DateTime.UtcNow); };
+        await queue.StartAsync(CancellationToken.None);
+
+        queue.Enqueue("nothing will synthesize.", cancelCurrent: false);
+
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (drained) if (drained.Count > 0) break;
+            await Task.Delay(50);
+        }
+        lock (drained) Assert.Single(drained);
+        await queue.StopAsync();
+    }
+
+    [Fact]
+    public async Task FallbackRaised_SurfacesTheTtsFallbackMessage()
+    {
+        var fallbacks = new List<string>();
+        var tts = new NullTtsWithFallback();
+        await using var queue = new SpeechQueue(tts, new NullAudioOut(), NullLogger<SpeechQueue>.Instance);
+        queue.FallbackRaised += f => { lock (fallbacks) fallbacks.Add(f); };
+        await queue.StartAsync(CancellationToken.None);
+
+        queue.Enqueue("hello.", cancelCurrent: false);
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (fallbacks) if (fallbacks.Count > 0) break;
+            await Task.Delay(50);
+        }
+        lock (fallbacks) Assert.Equal(new[] { "fell back" }, fallbacks);
+        await queue.StopAsync();
+    }
+
+    private sealed class NullTtsWithFallback : ITtsService
+    {
+        public bool IsConfigured => true;
+        public Task<TtsAudio?> SynthesizeAsync(string text, CancellationToken ct) =>
+            Task.FromResult<TtsAudio?>(new TtsAudio(new byte[4800], 24000, FallbackMessage: "fell back"));
+    }
 }
