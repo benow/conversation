@@ -7,13 +7,17 @@ public static class AiProviderRegistry
     public static readonly IAiProvider OpenAiCompatible = new OpenAiCompatibleProvider();
     public static readonly IAiProvider Replicate = new ReplicateProvider();
     public static readonly IAiProvider Groq = new GroqProvider();
+    public static readonly IAiProvider Cartesia = new CartesiaProvider();
+    public static readonly IAiProvider MiniMax = new MiniMaxProvider();
 
     private static readonly Dictionary<string, IAiProvider> _providers = new()
     {
         [OpenRouter.Id] = OpenRouter,
         [OpenAiCompatible.Id] = OpenAiCompatible,
         [Replicate.Id] = Replicate,
-        [Groq.Id] = Groq
+        [Groq.Id] = Groq,
+        [Cartesia.Id] = Cartesia,
+        [MiniMax.Id] = MiniMax
     };
 
     public static IReadOnlyList<IAiProvider> All => _providers.Values.ToList();

@@ -231,3 +231,84 @@ public class OpenAiCompatibleProvider : IAiProvider
         public string? Id { get; set; }
     }
 }
+
+
+/// <summary>
+/// Cartesia (Sonic) — ultra-low-latency TTS (~1.5s round trip vs XTTS-v2's ~4.2s through the
+/// same Replicate-free direct path) and Ink-whisper STT. Probed live 2026-09-19: /tts/bytes
+/// returns raw s16le PCM; /stt multipart returns {"text": ...}. Voice cloning (voices/clone)
+/// is a PAID tier feature — on free, TtsVoice must be a Cartesia voice id (preset/library or
+/// dashboard-cloned), NOT a voice-library WAV filename.
+/// </summary>
+public class CartesiaProvider : IAiProvider
+{
+    public string Id => "cartesia";
+    public string DisplayName => "Cartesia";
+    public AiCapability Capabilities => AiCapability.Tts | AiCapability.Stt;
+    public string GetBaseUrl() => "https://api.cartesia.ai";
+
+    public ProviderConfigField[] GetConfigFields() =>
+    [
+        new ProviderConfigField
+        {
+            Key = "CartesiaApiKey",
+            Type = "password",
+            Label = "API Key",
+            Description = "Cartesia API key from https://play.cartesia.ai/keys (X-API-Key)"
+        }
+    ];
+
+    public Task<IReadOnlyList<ModelInfo>> GetModelsAsync(string apiKey, string? baseUrl, HttpClient http, CancellationToken ct)
+    {
+        return Task.FromResult<IReadOnlyList<ModelInfo>>(new[]
+        {
+            new ModelInfo("sonic-3", "Sonic 3 — TTS, fastest (cloning needs paid tier)"),
+            new ModelInfo("sonic-2", "Sonic 2 — TTS"),
+            new ModelInfo("sonic", "Sonic — TTS"),
+            new ModelInfo("ink-whisper", "Ink Whisper — STT transcription")
+        });
+    }
+}
+
+/// <summary>
+/// MiniMax direct API (speech-2.8/02 series) — cloning via their platform or the
+/// minimax/voice-cloning Replicate model (clone once → voice id). Native speed param exists
+/// (0.5–2.0) but NASTV's speech rate applies atempo post-synthesis, provider-agnostically.
+/// Requires an API key AND a Group Id (both from https://platform.minimax.io). Content
+/// moderation on adult material is UNVERIFIED — test with real content before committing.
+/// </summary>
+public class MiniMaxProvider : IAiProvider
+{
+    public string Id => "minimax";
+    public string DisplayName => "MiniMax";
+    public AiCapability Capabilities => AiCapability.Tts;
+    public string GetBaseUrl() => "https://api.minimax.io/v1";
+
+    public ProviderConfigField[] GetConfigFields() =>
+    [
+        new ProviderConfigField
+        {
+            Key = "MiniMaxApiKey",
+            Type = "password",
+            Label = "API Key",
+            Description = "MiniMax API key from https://platform.minimax.io"
+        },
+        new ProviderConfigField
+        {
+            Key = "MiniMaxGroupId",
+            Type = "string",
+            Label = "Group ID",
+            Description = "MiniMax Group Id — platform.minimax.io → Account → Basic Information"
+        }
+    ];
+
+    public Task<IReadOnlyList<ModelInfo>> GetModelsAsync(string apiKey, string? baseUrl, HttpClient http, CancellationToken ct)
+    {
+        return Task.FromResult<IReadOnlyList<ModelInfo>>(new[]
+        {
+            new ModelInfo("speech-2.8-turbo", "Speech 2.8 Turbo — fastest"),
+            new ModelInfo("speech-02-turbo", "Speech 02 Turbo"),
+            new ModelInfo("speech-02-hd", "Speech 02 HD — highest quality")
+        });
+    }
+}
