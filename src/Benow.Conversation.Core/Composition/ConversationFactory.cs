@@ -157,7 +157,7 @@ public static class ConversationFactory
             Device = string.IsNullOrWhiteSpace(config.OutputDevice) ? null : config.OutputDevice
         });
 
-        var speech = new SpeechQueue(tts, pipeline, loggerFactory.CreateLogger<SpeechQueue>());
+        var speech = new SpeechQueue(tts, new PcmPlaybackAudioOut(pipeline), loggerFactory.CreateLogger<SpeechQueue>());
         await speech.StartAsync(ct);
 
         var engine = new ConversationEngine(

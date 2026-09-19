@@ -31,7 +31,7 @@ public class SpeechQueueTests
         // concrete, so this test covers the queue semantics with a real pipeline instance.
         await using var pipeline = new PcmPlaybackPipeline(NullLogger<PcmPlaybackPipeline>.Instance,
             new PcmPlaybackOptions { FfplayPath = "ffplay", SampleRate = 24000 });
-        await using var queue = new SpeechQueue(tts, pipeline, NullLogger<SpeechQueue>.Instance);
+        await using var queue = new SpeechQueue(tts, new PcmPlaybackAudioOut(pipeline), NullLogger<SpeechQueue>.Instance);
         await queue.StartAsync(CancellationToken.None);
 
         queue.Enqueue("chunk one.", cancelCurrent: false);

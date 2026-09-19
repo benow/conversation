@@ -100,7 +100,7 @@ var pipeline = new PcmPlaybackPipeline(loggerFactory.CreateLogger<PcmPlaybackPip
     Device = string.IsNullOrWhiteSpace(config.OutputDevice) ? null : config.OutputDevice,
     FreshStartWarmupMs = Arg("--warmup") is { } warmArg && int.TryParse(warmArg, out var warmMs) ? warmMs : 500
 });
-var speech = new SpeechQueue(tts, pipeline, loggerFactory.CreateLogger<SpeechQueue>());
+var speech = new SpeechQueue(tts, new PcmPlaybackAudioOut(pipeline), loggerFactory.CreateLogger<SpeechQueue>());
 await speech.StartAsync(CancellationToken.None);
 
 await using var engine = new ConversationEngine(

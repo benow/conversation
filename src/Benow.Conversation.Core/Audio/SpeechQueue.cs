@@ -6,19 +6,22 @@ using Microsoft.Extensions.Logging;
 namespace Benow.Conversation.Audio;
 
 /// <summary>
-/// Speak queue: text in, audio out. Synthesizes each item via <see cref="ITtsService"/> and pipes
-/// the PCM to the playback pipeline. Cancel-on-new semantics (V1's SpeechQueue): enqueuing with
-/// <c>cancelCurrent</c> stops in-flight playback so a new turn is heard immediately rather than
-/// after the previous reply drains.
+/// Speak queue: text in, audio out. Synthesizes each item via <see cref="ITtsService"/> and hands
+/// the ordered PCM chunks to an <see cref="IAudioOut"/> sink. Cancel-on-new semantics (V1's
+/// SpeechQueue): enqueuing with <c>cancelCurrent</c> stops in-flight playback so a new turn is
+/// heard immediately rather than after the previous reply drains.
 ///
 /// SYNTHESIS RUNS AHEAD OF PLAYBACK (2026-09-18, found by the Lab's --bench). The original shape
-/// was one serial loop — synthesize chunk, pipe it (which blocks while ffplay plays it at 1x),
+/// was one serial loop — synthesize chunk, pipe it (which blocks while the sink plays it at 1x),
 /// then synthesize the next. With Replicate XTTS that produced 6.6s and 10.3s of DEAD SILENCE
 /// between chunks of one reply: chunk N+1's synthesis only started once chunk N's audio had
 /// drained. Two stages now run concurrently — a synthesizer filling a small look-ahead buffer and
 /// a player draining it — so chunk N+1 is ready before chunk N stops playing.
-/// Ported and simplified from V1's SpeechQueue (2026-09-17, phase 2) — the Core version speaks
-/// one provider (ITtsService) instead of V1's four backend branches.
+///
+/// THE SINK IS THE SEAM (2026-09-19, "no duplicated functionality"): everything improvable here —
+/// look-ahead depth, ordering, cancellation, gap metrics — lives in the package. The last mile is
+/// pluggable: desktop passes <see cref="PcmPlaybackAudioOut"/> (local ffplay), NASTV passes a
+/// SignalR sink that streams chunks to TV/phone clients. Same engine, improvements land everywhere.
 /// </summary>
 public sealed class SpeechQueue : IAsyncDisposable
 {
@@ -27,7 +30,7 @@ public sealed class SpeechQueue : IAsyncDisposable
     private const int LookAheadChunks = 2;
 
     private readonly ITtsService _tts;
-    private readonly PcmPlaybackPipeline _pipeline;
+    private readonly IAudioOut _audioOut;
     private long _playbackMs;
     private volatile bool _inFlight;
     private readonly ILogger<SpeechQueue> _logger;
@@ -42,22 +45,22 @@ public sealed class SpeechQueue : IAsyncDisposable
     // SingleReader — caught live 2026-09-18), so track the queue depth explicitly.
     private int _queued;
 
-    /// <summary>A synthesized chunk waiting for its turn to play.</summary>
-    private sealed record SynthesizedAudio(string Text, byte[] Pcm, long AudioMs, long SynthMs);
+    /// <summary>A synthesized chunk waiting for its turn to play. Public: the sink receives it.</summary>
+    public sealed record SynthesizedAudio(string Text, byte[] Pcm, long AudioMs, long SynthMs);
 
     /// <summary>Raised per completed item: (text, audioMs) — drives per-turn metrics.</summary>
     public event Action<string, long>? Spoken;
     /// <summary>Raised when an item's synthesis returns: (text, synthMs) — latency instrumentation.</summary>
     public event Action<string, long>? ItemSynthesized;
-    /// <summary>Raised when an item's PCM has been handed to the playback pipeline (first mark = first audio out).</summary>
+    /// <summary>Raised when an item's PCM has been handed to the sink (first mark = first audio out).</summary>
     public event Action<string>? ItemPiped;
-    /// <summary>Fired when a chunk's PCM starts being handed to the player (before the pipe blocks).</summary>
+    /// <summary>Fired when a chunk's PCM starts being handed to the sink (before the play call blocks).</summary>
     public event Action<string, long>? PlaybackStarted;
 
-    public SpeechQueue(ITtsService tts, PcmPlaybackPipeline pipeline, ILogger<SpeechQueue> logger)
+    public SpeechQueue(ITtsService tts, IAudioOut audioOut, ILogger<SpeechQueue> logger)
     {
         _tts = tts;
-        _pipeline = pipeline;
+        _audioOut = audioOut;
         _logger = logger;
     }
 
@@ -71,10 +74,11 @@ public sealed class SpeechQueue : IAsyncDisposable
     public bool IsIdle => Volatile.Read(ref _queued) == 0 && !_inFlight;
 
     /// <summary>
-    /// Starts the playback process before any text exists, so the first chunk does not pay
+    /// Starts the playback sink before any text exists, so the first chunk does not pay
     /// process start + audio-device open. Called at session start when prewarming is enabled.
+    /// Sinks that have nothing to warm (e.g. streaming to clients) are no-ops.
     /// </summary>
-    public Task PrewarmAsync(CancellationToken ct = default) => _pipeline.PrewarmAsync(ct);
+    public Task PrewarmAsync(CancellationToken ct = default) => _audioOut.PrewarmAsync(ct);
 
     /// <summary>Enqueue text to speak. <paramref name="cancelCurrent"/> interrupts playback in progress.</summary>
     public void Enqueue(string text, bool cancelCurrent = true)
@@ -85,7 +89,7 @@ public sealed class SpeechQueue : IAsyncDisposable
         if (cancelCurrent)
         {
             try { _currentItemCts?.Cancel(); } catch (ObjectDisposedException) { }
-            InterruptPlayback();
+            ResetSink();
         }
         if (_channel.Writer.TryWrite(text)) Interlocked.Increment(ref _queued);
     }
@@ -107,13 +111,13 @@ public sealed class SpeechQueue : IAsyncDisposable
     public void FlushOnly()
     {
         try { _currentItemCts?.Cancel(); } catch (ObjectDisposedException) { }
-        InterruptPlayback();
+        ResetSink();
     }
 
-    private void InterruptPlayback()
+    private void ResetSink()
     {
-        try { _pipeline.InterruptAsync().GetAwaiter().GetResult(); }
-        catch (Exception ex) { _logger.LogWarning(ex, "[speech] pipeline interrupt failed"); }
+        try { _audioOut.ResetAsync().GetAwaiter().GetResult(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "[speech] sink reset failed"); }
     }
 
     public Task StartAsync(CancellationToken ct)
@@ -190,12 +194,12 @@ public sealed class SpeechQueue : IAsyncDisposable
             try
             {
                 using var pcm = new MemoryStream(item.Pcm);
-                // PlaybackStarted fires BEFORE the pipe: PipeAsync blocks while ffplay consumes at
-                // real-time rate, so firing after it reported "first audio" up to a second and a
-                // half late (and made chunk-gap maths nonsense — caught by the Lab's --bench).
+                // PlaybackStarted fires BEFORE the play call: the sink blocks while the audio is
+                // consumed at real-time rate, so firing after it reported "first audio" up to a
+                // second and a half late (and made chunk-gap maths nonsense — Lab --bench, 2026-09-18).
                 var playbackSw = Stopwatch.StartNew();
                 PlaybackStarted?.Invoke(item.Text, item.AudioMs);
-                await _pipeline.PipeAsync(pcm, ct);
+                await _audioOut.PlayAsync(item, ct);
                 _playbackMs += playbackSw.ElapsedMilliseconds;
                 ItemPiped?.Invoke(item.Text);
                 Spoken?.Invoke(item.Text, item.AudioMs);

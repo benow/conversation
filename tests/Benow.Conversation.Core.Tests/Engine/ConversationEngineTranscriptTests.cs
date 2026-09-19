@@ -56,7 +56,7 @@ public class ConversationEngineTranscriptTests
         var tts = new StubTts();
         var pipeline = new PcmPlaybackPipeline(NullLogger<PcmPlaybackPipeline>.Instance,
             new PcmPlaybackOptions { FfplayPath = "ffplay" });
-        var queue = new SpeechQueue(tts, pipeline, NullLogger<SpeechQueue>.Instance);
+        var queue = new SpeechQueue(tts, new PcmPlaybackAudioOut(pipeline), NullLogger<SpeechQueue>.Instance);
         return new ConversationEngine(NullLogger<ConversationEngine>.Instance, stt, chat, tts, queue, options);
     }
 
