@@ -278,3 +278,17 @@ Both are marker-scoped now (`conversation-pcm` / `conversation-v1-pcm`); keep th
   all 19 items verified), and Playwright + screenshot + vision for the settings page. The Avalonia
   headless renderer covers overlay pixels. gnome-screenshot is now installed but is a dead end on
   Wayland; don't reach for it again.
+
+## IAudioOut — the playback seam (0.5.0/0.5.1, 2026-09-19)
+
+`SpeechQueue` owns everything improvable (look-ahead synthesis, ordering, pacing, cancellation,
+gap metrics); the last mile is `IAudioOut` — `PlayAsync(chunk, ct)` BLOCKS for the audio duration
+(that backpressure is what the look-ahead overlaps), `ResetAsync()` = barge-in, optional
+`PrewarmAsync`. Desktop ships `PcmPlaybackAudioOut` (ffplay); NASTV writes a SignalR sink. 0.5.1
+added the two lifecycle signals a remote sink needs: `FallbackRaised` (TtsAudio.FallbackMessage —
+the user must know the configured TTS engine is not the one speaking) and `Drained` (fires once
+when queued + in-flight + look-ahead are all empty, checked on BOTH stages' item boundaries so a
+fully-dropped turn still drains — regression-tested; a host waiting on Drained must never hang).
+Publish flow: bump Version in the Core csproj → commit → tag vX.Y.Z → push both → CI publishes to
+nuget.benow.ca. NOTE: NuGet's client HTTP cache holds package indexes ~30 min — a just-published
+version needs `dotnet restore --no-http-cache` to be seen immediately.
