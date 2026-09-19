@@ -85,11 +85,15 @@ public class AiProviderInstancesTests
     }
 
     [Fact]
-    public void Registry_FourProviders_CapabilityFilters()
+    public void Registry_SixProviders_CapabilityFilters()
     {
-        Assert.Equal(4, AiProviderRegistry.All.Count);
+        Assert.Equal(6, AiProviderRegistry.All.Count);
         Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Stt), p => p.Id == "groq");
+        Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Stt), p => p.Id == "cartesia");
         Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Tts), p => p.Id == "replicate");
+        Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Tts), p => p.Id == "cartesia");
+        Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Tts), p => p.Id == "minimax");
+        Assert.DoesNotContain(AiProviderRegistry.ForCapability(AiCapability.Tts), p => p.Id == "groq");
         Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Llm), p => p.Id == "openai-compatible");
     }
 }
