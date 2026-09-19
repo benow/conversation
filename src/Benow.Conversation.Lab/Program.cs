@@ -113,7 +113,8 @@ await using var engine = new ConversationEngine(
         Pacer = new TtsChunkPacerOptions
         {
             FirstMinChars = Arg("--first") is { } firstArg && int.TryParse(firstArg, out var firstChars) ? firstChars : 40,
-            ParagraphMaxChars = Arg("--para") is { } paraArg && int.TryParse(paraArg, out var paraChars) ? paraChars : 300
+            MaxChars = Arg("--para") is { } paraArg && int.TryParse(paraArg, out var paraChars) ? paraChars : 320,
+            GrowthFactor = Arg("--growth") is { } growthArg && double.TryParse(growthArg, System.Globalization.CultureInfo.InvariantCulture, out var growth) ? growth : 1.4
         }
     },
     voice);
@@ -245,7 +246,8 @@ if (Arg("--bench") is { } benchPath)
         WarmupMs = Arg("--warmup") is { } w2 && int.TryParse(w2, out var wm2) ? wm2 : 500,
         Correction = !Flag("--no-correction"),
         FirstMinChars = Arg("--first") is { } f2 && int.TryParse(f2, out var fm2) ? fm2 : 40,
-        ParagraphMaxChars = Arg("--para") is { } p2 && int.TryParse(p2, out var pm2) ? pm2 : 300,
+        MaxChars = Arg("--para") is { } p2 && int.TryParse(p2, out var pm2) ? pm2 : 320,
+        GrowthFactor = Arg("--growth") is { } g2 && double.TryParse(g2, System.Globalization.CultureInfo.InvariantCulture, out var gm2) ? gm2 : 1.4,
         Muted = Flag("--mute"),
         Speak = true
     }, engine, speech, loggerFactory);

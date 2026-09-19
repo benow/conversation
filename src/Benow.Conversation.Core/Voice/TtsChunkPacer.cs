@@ -3,53 +3,63 @@ using System.Text;
 namespace Benow.Conversation.Voice;
 
 /// <summary>
-/// Turns completed sentences into TTS synthesis chunks with three-stage pacing
-/// (2026-08-29): the FIRST chunk is the first sentence (fast first audio), the SECOND
-/// chunk is the rest of the first paragraph (fired at the paragraph break, or early if
-/// the paragraph runs long), and everything after that batches at the steady-state
-/// threshold. Before this, a long reply collapsed into "small first chunk → one huge
-/// slow remainder", leaving a long silent gap after the opening sentence.
-/// Pure and stateless per turn — create one per LLM response.
-/// Ported from NASTV nastv-player-core/Voice/TtsChunkPacer.cs (2026-09-17, phase 1).
+/// Turns completed sentences into TTS synthesis chunks with ADAPTIVE pacing (2026-09-19):
+/// the FIRST chunk is the first sentence (fast first audio), and every following chunk's
+/// threshold grows from the PREVIOUS CHUNK'S ACTUAL LENGTH by <see cref="TtsChunkPacerOptions.GrowthFactor"/>.
+///
+/// Why growth (the "long pause after the first line" fix): a chunk gaps when its synthesis
+/// takes longer than the previous chunk's audio. Replicate XTTS synthesizes at ~43ms/char and
+/// plays at ~65ms/char, so next ≤ prev × ~1.5 always self-sustains; 1.4 adds safety. The old
+/// fixed stages (first sentence → rest-of-paragraph up to 300c → 320c batches) put a ~13s
+/// synthesis right after a ~4s first chunk — the audio ran dry mid-reply (heard live on the
+/// TV, 2026-09-19). Growth starts small (the first chunk's size) and amortizes up to the cap.
+///
+/// Paragraph breaks still fire early (≥ FirstMinChars buffered) — a paragraph is a natural
+/// TTS pause and prosody benefits.
+/// Pure per turn — create one per LLM response. Ported from NASTV (2026-09-17, phase 1).
 /// </summary>
 public sealed class TtsChunkPacer
 {
     private readonly TtsChunkPacerOptions _options;
     private readonly StringBuilder _pending = new();
-    private int _stage; // 0 = awaiting first chunk, 1 = rest of first paragraph, 2+ = steady state
+    private int _stage;
+    private int _lastEmittedChars;
 
     public TtsChunkPacer(TtsChunkPacerOptions? options = null) => _options = options ?? new TtsChunkPacerOptions();
 
-    /// <summary>First chunk floor: a bare "OK." waits for the next sentence instead of
-    /// synthesizing almost nothing (XTTS quality needs a little text).</summary>
-    private int FirstMinChars => _options.FirstMinChars;
-    /// <summary>Rest-of-first-paragraph cap: a wall-of-text paragraph must not delay the
-    /// second chunk indefinitely.</summary>
-    private int ParagraphMaxChars => _options.ParagraphMaxChars;
-    /// <summary>Steady-state batching after the first paragraph (unchanged from the old
-    /// LaterTtsMinChars).</summary>
-    private int LaterMinChars => _options.LaterMinChars;
-
-    /// <summary>Feed completed sentences; returns the chunk texts that crossed their stage
-    /// threshold (0..n per call). Feed segments in stream order.</summary>
+    /// <summary>Feed completed sentences; returns the chunk texts that crossed their threshold
+    /// (0..n per call). Feed segments in stream order.</summary>
     public List<string> AddRange(IEnumerable<SentenceSegment> segments)
     {
         var emitted = new List<string>();
         foreach (var seg in segments)
         {
             _pending.Append(seg.Text).Append(' ');
-            var crossed =
-                _stage == 0 ? _pending.Length >= FirstMinChars :
-                _stage == 1 ? (seg.EndsParagraph || _pending.Length >= ParagraphMaxChars) :
-                _pending.Length >= LaterMinChars;
+            // Stage 0: only the floor counts — the first chunk is the first sentence, so first
+            // audio lands as early as quality allows. A paragraph end does NOT release a tiny
+            // first chunk.
+            // Stage 1+: the growth threshold, or an early fire at a paragraph break (natural pause).
+            var crossed = _stage == 0
+                ? _pending.Length >= _options.FirstMinChars
+                : _pending.Length >= NextThreshold()
+                    || (seg.EndsParagraph && _pending.Length >= _options.FirstMinChars);
             if (crossed)
             {
                 emitted.Add(_pending.ToString().Trim());
+                _lastEmittedChars = _pending.Length;
                 _pending.Clear();
                 _stage++;
             }
         }
         return emitted;
+    }
+
+    /// <summary>The next chunk's fire threshold: the previous chunk's size grown by the factor,
+    /// clamped to [FirstMinChars, MaxChars].</summary>
+    private int NextThreshold()
+    {
+        var next = (int)(_lastEmittedChars * _options.GrowthFactor);
+        return Math.Clamp(next, _options.FirstMinChars, _options.MaxChars);
     }
 
     /// <summary>Flush whatever is still buffered (end of the LLM stream) — the trailing
@@ -64,17 +74,23 @@ public sealed class TtsChunkPacer
 }
 
 /// <summary>
-/// Pacer thresholds. Defaults are NASTV's proven values (2026-08-29/31 tuning): the FIRST chunk
-/// is the first sentence (fast first audio), the SECOND is the rest of the first paragraph, and
-/// everything after batches at the steady-state threshold. Exposed as options so the trade-off
-/// (smaller first chunk = faster first audio but more provider calls per reply) can be MEASURED
-/// rather than guessed — see the Lab's --bench.
+/// Pacer tuning. Defaults: first chunk = first sentence (≥40c), then each chunk grows 1.4×
+/// from the previous one up to 320c — synthesis time for chunk N+1 always fits inside chunk
+/// N's playback, so playback never catches up with synthesis (the smoothness/immediacy
+/// balance measured with the Lab's --bench; see the conversation repo AGENTS.md).
 /// </summary>
 public sealed record TtsChunkPacerOptions
 {
+    /// <summary>First chunk floor: a bare "OK." waits for the next sentence instead of
+    /// synthesizing almost nothing (XTTS quality needs a little text).</summary>
     public int FirstMinChars { get; init; } = 40;
-    /// <summary>480→300 (2026-08-31): Replicate XTTS runs ~11-16s for 300-400c, so 480c chunks
-    /// held the next chunk's audio back ~18s.</summary>
-    public int ParagraphMaxChars { get; init; } = 300;
-    public int LaterMinChars { get; init; } = 320;
+    /// <summary>
+    /// Per-chunk growth of the fire threshold. Must stay ≤ ~1.5: a chunk gaps when its
+    /// synthesis (≈43ms/char on Replicate) outlasts the previous chunk's audio (≈65ms/char),
+    /// and 43 × 1.5 ≈ 65. Higher values trade smoothness for fewer provider calls.
+    /// </summary>
+    public double GrowthFactor { get; init; } = 1.4;
+    /// <summary>Steady-state cap. 480→300 (2026-08-31, now the growth cap): huge chunks held
+    /// the next chunk's audio back ~18s.</summary>
+    public int MaxChars { get; init; } = 320;
 }

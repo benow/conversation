@@ -18,13 +18,14 @@ internal sealed record BenchOptions
     public int WarmupMs { get; init; } = 500;
     public bool Correction { get; init; } = true;
     public int FirstMinChars { get; init; } = 40;
-    public int ParagraphMaxChars { get; init; } = 300;
+    public int MaxChars { get; init; } = 320;
+    public double GrowthFactor { get; init; } = 1.4;
     public bool Muted { get; init; }
     public bool Speak { get; init; } = true;
 
     public string Describe() =>
         $"prewarm={(Prewarm ? "on" : "off")} warmup={WarmupMs}ms correction={(Correction ? "on" : "off")} " +
-        $"first={FirstMinChars}c para={ParagraphMaxChars}c speak={(Speak ? "on" : "off")}";
+        $"first={FirstMinChars}c cap={MaxChars}c growth={GrowthFactor} speak={(Speak ? "on" : "off")}";
 }
 
 /// <summary>

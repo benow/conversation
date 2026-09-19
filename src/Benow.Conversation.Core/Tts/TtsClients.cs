@@ -240,7 +240,7 @@ public sealed class ReplicateTtsClient : ITtsService
         }
 
         _logger.LogError("[tts] Replicate poll timed out after 60s — the gate keeps predictions serialized; " +
-            "a timeout here usually means provider-side queueing. Consider a smaller chunk (lower ParagraphMaxChars)");
+            "a timeout here usually means provider-side queueing. Consider a smaller chunk (lower MaxChars)");
         return null;
     }
 }

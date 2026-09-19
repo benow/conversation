@@ -4,9 +4,11 @@ using Xunit;
 namespace Benow.Conversation.Core.Tests.Voice;
 
 /// <summary>
-/// Three-stage TTS pacing (2026-08-29): first chunk = first sentence, second = rest of the
-/// first paragraph, then steady-state batches. Regression for the "first sentence → long
-/// silent gap → everything else" complaint on long replies.
+/// Adaptive TTS pacing (2026-09-19): first chunk = first sentence, then each chunk's threshold
+/// grows ~1.4× from the previous chunk's ACTUAL length (capped) — so chunk N+1's synthesis
+/// always fits inside chunk N's playback and the audio never runs dry mid-reply. Regression
+/// context: the fixed stages (first sentence → up-to-300c paragraph → 320c batches) put a ~13s
+/// synthesis right after a ~4s first chunk; the gap was audible on the TV.
 /// </summary>
 public class TtsChunkPacerTests
 {
@@ -24,39 +26,78 @@ public class TtsChunkPacerTests
     }
 
     [Fact]
-    public void SecondChunk_IsRestOfFirstParagraph_AtParagraphBreak()
+    public void SecondChunk_FiresWhenGrowthFromTheFirstChunkIsCrossed()
     {
         var pacer = new TtsChunkPacer();
-        pacer.AddRange(new[] { S("First sentence that is long enough to cross the floor easily.") });
-        // Sentences inside the same paragraph (no paragraph break) stay buffered even past 320 chars.
-        var mid = pacer.AddRange(new[] { S(Sentence(80)), S(Sentence(80)) });
-        Assert.Empty(mid);
-        // Paragraph break → the rest of the paragraph fires as the second chunk.
-        var chunk = Assert.Single(pacer.AddRange(new[] { S(Sentence(30), endsParagraph: true) }));
-        Assert.True(chunk.Length >= 150);
+        var first = Assert.Single(pacer.AddRange(new[] { S("First sentence that is long enough to cross the floor easily.") }));
+        // Threshold = 61c × 1.4 ≈ 85c: an 80c sentence stays buffered...
+        Assert.Empty(pacer.AddRange(new[] { S(Sentence(80)) }));
+        // ...but the next sentence crosses it (161 ≥ 85) and fires as the second chunk.
+        var chunk = Assert.Single(pacer.AddRange(new[] { S(Sentence(30)) }));
+        Assert.True(chunk.Length >= 85);
+        Assert.True(chunk.Length < 200);
     }
 
     [Fact]
-    public void LongParagraph_CapsBeforeTheBreak()
+    public void ParagraphBreak_FiresEarly_AnyStageAfterTheFirst()
     {
         var pacer = new TtsChunkPacer();
         pacer.AddRange(new[] { S("First sentence that is long enough to cross the floor easily.") });
-        // 4 × 150-char sentences with no paragraph break → the cap fires mid-paragraph.
-        var fired = pacer.AddRange(new[] { S(Sentence(150)), S(Sentence(150)), S(Sentence(150)), S(Sentence(150)) });
-        Assert.NotEmpty(fired);
+        // Only 40c buffered, but the paragraph ends — fire early (natural TTS pause).
+        var chunk = Assert.Single(pacer.AddRange(new[] { S(Sentence(40), endsParagraph: true) }));
+        Assert.True(chunk.Length >= 40);
     }
 
     [Fact]
-    public void SteadyState_AfterFirstParagraph_BatchesAt320()
+    public void Growth_NeverExceedsTheCap_AndStaysAboveTheFloor()
     {
+        var pacer = new TtsChunkPacer(new TtsChunkPacerOptions { MaxChars = 200 });
+        pacer.AddRange(new[] { S("First sentence that is long enough to cross the floor easily.") }); // 61c
+
+        var lengths = new List<int>();
+        for (var i = 0; i < 12; i++)
+        {
+            foreach (var chunk in pacer.AddRange(new[] { S(Sentence(100)) }))
+                lengths.Add(chunk.Length);
+        }
+
+        Assert.NotEmpty(lengths);
+        Assert.All(lengths, l => Assert.InRange(l, 40, 400)); // sanity: each chunk is sane
+        // Monotone growth toward the cap: no emitted chunk may be smaller than half the previous
+        // (the threshold grows; the crossing overshoot is bounded by one sentence).
+        for (var i = 1; i < lengths.Count; i++)
+            Assert.True(lengths[i] >= lengths[i - 1] / 2, $"chunk {i} collapsed: {lengths[i - 1]} → {lengths[i]}");
+        Assert.True(lengths[^1] >= 150, $"should approach the cap; last={lengths[^1]}");
+    }
+
+    [Fact]
+    public void GrowthStaysWithinTwofold_ThePracticalNoLongGapBound()
+    {
+        // Strict no-gap (next synthesis ≤ prev playback ⇒ ratio ≤ 1.5) is impossible with
+        // sentence-quantized text: sentences arrive whole, so a chunk overshoots its threshold.
+        // The property that matters (the TV complaint was a 60c → 300c step, ratio 5×): no
+        // chunk may exceed ~2× the previous one — worst-case gap stays ~1-2s, never 10s.
+        // Uniform 100c sentences ARE the worst case for overshoot (threshold 141 → fires at
+        // 201 = exactly two sentences); real text varies and lands well under this.
+        const double synthMsPerChar = 43, playMsPerChar = 65;
         var pacer = new TtsChunkPacer();
-        pacer.AddRange(new[] { S("First sentence that is long enough to cross the floor easily.") });
-        pacer.AddRange(new[] { S(Sentence(40), endsParagraph: true) }); // paragraph closed
-        // Under 320 chars → buffered.
-        Assert.Empty(pacer.AddRange(new[] { S(Sentence(100)) }));
-        // Crossing 320 chars → fires.
-        var chunk = Assert.Single(pacer.AddRange(new[] { S(Sentence(230)) }));
-        Assert.True(chunk.Length >= 320);
+        pacer.AddRange(new[] { S("First sentence that is long enough to cross the floor easily.") }); // 61c
+
+        var lengths = new List<int> { 61 };
+        for (var i = 0; i < 10; i++)
+        {
+            foreach (var chunk in pacer.AddRange(new[] { S(Sentence(100)) }))
+                lengths.Add(chunk.Length);
+        }
+        Assert.True(lengths.Count >= 4, $"should emit several chunks, got {lengths.Count}");
+        for (var i = 1; i < lengths.Count; i++)
+        {
+            Assert.True(lengths[i] <= lengths[i - 1] * 2.05,
+                $"chunk {i} jumped {lengths[i - 1]} → {lengths[i]} (the 5× step that silenced the TV)");
+            // And the resulting gap must be small: synthesis over prev playback under ~2.5s.
+            var gap = lengths[i] * synthMsPerChar - lengths[i - 1] * playMsPerChar;
+            Assert.True(gap <= 2500, $"chunk {i} ({lengths[i]}c after {lengths[i - 1]}c) would gap {gap}ms");
+        }
     }
 
     [Fact]
@@ -64,11 +105,12 @@ public class TtsChunkPacerTests
     {
         var pacer = new TtsChunkPacer();
         pacer.AddRange(new[] { S("First sentence that is long enough to cross the floor easily.") });
-        pacer.AddRange(new[] { S(Sentence(40), endsParagraph: true) });
-        Assert.Empty(pacer.AddRange(new[] { S(Sentence(100)) }));
+        // A short tail below the growth threshold stays buffered (nothing fires), and the
+        // end-of-stream flush releases it regardless of size.
+        Assert.Empty(pacer.AddRange(new[] { S(Sentence(30)) }));
         var tail = pacer.Flush();
         Assert.NotNull(tail);
-        Assert.Equal(100, tail!.Length);
+        Assert.Equal(30, tail!.Length);
         Assert.Null(pacer.Flush()); // second flush is empty
     }
 
