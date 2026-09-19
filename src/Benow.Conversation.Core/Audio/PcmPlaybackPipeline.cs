@@ -22,6 +22,9 @@ public sealed record PcmPlaybackOptions
     /// <summary>Start ffplay at session start (before any text exists) so process start and device
     /// open are already paid for when the first chunk arrives. Measured: see AGENTS.md bench notes.</summary>
     public bool Prewarm { get; init; } = true;
+    /// <summary>Speech playback rate: 1.0 = normal, 1.2 = 20% faster (pitch-preserving atempo).
+    /// Clamped to [0.5, 2.0].</summary>
+    public double Rate { get; init; } = 1.0;
 }
 
 /// <summary>
@@ -267,6 +270,12 @@ public sealed class PcmPlaybackPipeline : IAsyncDisposable
         var args = $"-nodisp -loglevel quiet -window_title {WindowTitle}";
         args += $" -f s16le -ar {_options.SampleRate}";
         if (_options.Channels == 2) args += " -ch_layout stereo";
+        // Pitch-preserving time compression/expansion (the speech-rate slider). atempo must be
+        // chained for rates outside [0.5, 2.0]; the option is already clamped, so a single
+        // filter suffices. Applied as an input filter so raw PCM is resampled before the sink.
+        var rate = Math.Clamp(_options.Rate, 0.5, 2.0);
+        if (Math.Abs(rate - 1.0) > 0.01)
+            args += $" -af aformat=sample_rates={_options.SampleRate},atempo={rate.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
         if (_options.Volume.HasValue)
             args += $" -volume {Math.Clamp(_options.Volume.Value, 0, 100)}";
         if (!string.IsNullOrWhiteSpace(_options.Device))

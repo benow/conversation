@@ -87,6 +87,9 @@ internal static class SettingsPage
     <label>Input device</label><select id="inputDevice"></select>
     <label>Output device</label><input id="outputDevice" placeholder="default">
     <label>Playback volume (%)</label><input id="playbackVolume" type="number" min="0" max="100">
+    <label>Speech rate <span class="pill">1.0 = normal</span></label>
+    <div class="row"><input id="speechRate" type="range" min="0.75" max="1.5" step="0.05" value="1.0">
+    <output id="speechRateOut" style="align-self:center;min-width:38px;text-align:right">1.0×</output></div>
   </section>
 
   <section>
@@ -142,6 +145,9 @@ async function load() {
   $('ttsVoice').value = c.tts.voice || '';
   $('outputDevice').value = c.audio.outputDevice || '';
   $('playbackVolume').value = c.audio.volume ?? 100;
+  $('speechRate').value = c.audio.speechRate ?? 1.0;
+  $('speechRateOut').textContent = (c.audio.speechRate ?? 1.0).toFixed(2) + '×';
+  $('speechRate').oninput = e => $('speechRateOut').textContent = parseFloat(e.target.value).toFixed(2) + '×';
 
   const d = await api('/api/devices');
   const sel = $('inputDevice');
@@ -175,7 +181,8 @@ $('save').onclick = async () => {
       extractorModel: $('extractorModel').value, llmSystemPrompt: $('llmSystemPrompt').value,
       ttsProvider: $('ttsProvider').value, ttsModel: $('ttsModel').value, ttsVoice: $('ttsVoice').value,
       inputDevice: $('inputDevice').value, outputDevice: $('outputDevice').value,
-      playbackVolume: parseInt($('playbackVolume').value || '100', 10)
+      playbackVolume: parseInt($('playbackVolume').value || '100', 10),
+      speechRate: parseFloat($('speechRate').value)
     }));
     status($('status'), 'Saved. Restart the app to apply engine changes.', true);
     load();

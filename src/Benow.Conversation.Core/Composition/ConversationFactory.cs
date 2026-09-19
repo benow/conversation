@@ -154,14 +154,27 @@ public static class ConversationFactory
         {
             SampleRate = 24000,
             Volume = config.PlaybackVolume,
-            Device = string.IsNullOrWhiteSpace(config.OutputDevice) ? null : config.OutputDevice
+            Device = string.IsNullOrWhiteSpace(config.OutputDevice) ? null : config.OutputDevice,
+            Rate = config.SpeechRate <= 0 ? 1.0 : config.SpeechRate
         });
 
         var speech = new SpeechQueue(tts, new PcmPlaybackAudioOut(pipeline), loggerFactory.CreateLogger<SpeechQueue>());
         await speech.StartAsync(ct);
 
+        // The pacer must know the speech rate: faster speech shortens each chunk's playback
+        // without shortening synthesis, so the no-gap growth limit tightens proportionally.
+        var baseOptions = engineOptions ?? new EngineOptions();
+        var engineOptionsWithRate = baseOptions with
+        {
+            Pacer = baseOptions.Pacer with
+            {
+                PlaybackSpeed = double.IsFinite(baseOptions.Pacer.PlaybackSpeed) && baseOptions.Pacer.PlaybackSpeed > 1.0
+                    ? baseOptions.Pacer.PlaybackSpeed
+                    : Math.Clamp(config.SpeechRate, 0.5, 2.0)
+            }
+        };
         var engine = new ConversationEngine(
-            loggerFactory.CreateLogger<ConversationEngine>(), stt, chat, tts, speech, engineOptions, sink);
+            loggerFactory.CreateLogger<ConversationEngine>(), stt, chat, tts, speech, engineOptionsWithRate, sink);
 
         // Point the chat client's failure reporting at the ENGINE's sink, resolved per call, so a
         // host that attaches its UI sink after construction still receives provider errors.

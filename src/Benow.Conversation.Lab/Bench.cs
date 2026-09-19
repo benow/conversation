@@ -11,6 +11,9 @@ namespace Benow.Conversation.Lab;
 internal sealed record BenchOptions
 {
     public required string InputWav { get; init; }
+    /// <summary>Inject the transcript directly (skip STT) — isolates LLM/TTS pacing for A/B tests
+    /// where the question (not the recognition) is the variable.</summary>
+    public string? Text { get; init; }
     public int Repeats { get; init; } = 2;
     public string? Label { get; init; }
     public string? JsonOut { get; init; }
@@ -45,6 +48,8 @@ internal static class Bench
         BenchOptions options, ConversationEngine engine, SpeechQueue speech,
         ILoggerFactory loggerFactory, CancellationToken ct = default)
     {
+        if (!string.IsNullOrWhiteSpace(options.Text))
+            return await RunTextAsync(options, engine, speech, ct);
         if (!File.Exists(options.InputWav))
         {
             Console.Error.WriteLine($"bench: input not found: {options.InputWav}");
@@ -77,6 +82,91 @@ internal static class Bench
             Console.WriteLine($"[bench] wrote {options.JsonOut}");
         }
         return 0;
+    }
+
+    private static async Task<int> RunTextAsync(
+        BenchOptions options, ConversationEngine engine, SpeechQueue speech, CancellationToken ct)
+    {
+        Console.WriteLine($"[bench] {options.Describe()}  repeats={options.Repeats}  (text-injected)");
+        Console.WriteLine($"[bench] prompt: {options.Text}");
+        var runs = new List<RunResult>();
+        for (var i = 0; i < options.Repeats; i++)
+        {
+            var result = await RunTurnOnlyAsync(options, engine, speech, i + 1, ct);
+            if (result == null) return 1;
+            runs.Add(result);
+            PrintRun(result);
+            if (i + 1 < options.Repeats) await Task.Delay(600, ct);
+        }
+        PrintSummary(options, runs);
+        if (options.JsonOut != null)
+        {
+            await File.WriteAllTextAsync(options.JsonOut,
+                JsonSerializer.Serialize(new { options = options.Describe(), runs }, JsonOpts) + "\n", ct);
+            Console.WriteLine($"[bench] wrote {options.JsonOut}");
+        }
+        return 0;
+    }
+
+    private static async Task<RunResult?> RunTurnOnlyAsync(
+        BenchOptions options, ConversationEngine engine, SpeechQueue speech, int index, CancellationToken ct)
+    {
+        var timeline = new TurnTimeline();
+        engine.Timeline = timeline;
+        engine.Muted = options.Muted;
+
+        var pipes = new List<(string Text, long Ms, long AudioMs)>();
+        var started = Stopwatch.StartNew();
+        void OnPlaybackStarted(string text, long audioMs)
+        {
+            lock (pipes) pipes.Add((text, started.ElapsedMilliseconds, audioMs));
+        }
+        speech.PlaybackStarted += OnPlaybackStarted;
+
+        try
+        {
+            var result = await engine.ConverseAsync(options.Text!.Trim(), ct);
+            if (result == null)
+            {
+                Console.Error.WriteLine($"[bench] run {index}: LLM turn failed");
+                return null;
+            }
+
+            var idleSince = (long?)null;
+            var drainDeadline = DateTime.UtcNow.AddSeconds(180);
+            while (DateTime.UtcNow < drainDeadline)
+            {
+                if (speech.IsIdle) break;
+                await Task.Delay(150, ct);
+            }
+            long playbackEnd;
+            lock (pipes) playbackEnd = pipes.Count == 0 ? 0 : pipes[^1].Ms + pipes[^1].AudioMs;
+            if (playbackEnd > started.ElapsedMilliseconds)
+                await Task.Delay((int)(playbackEnd - started.ElapsedMilliseconds) + 500, ct);
+
+            var chunks = new List<(string Text, long Ms, long AudioMs)>();
+            lock (pipes) chunks.AddRange(pipes);
+
+            return new RunResult
+            {
+                Index = index,
+                Transcript = options.Text!,
+                Reply = result.Text,
+                ReplyChars = result.Text.Length,
+                Chunks = chunks.Count,
+                StopMs = 0,
+                TtftMs = timeline[TurnTimeline.Milestones.LlmFirstToken],
+                FirstAudioMs = timeline[TurnTimeline.Milestones.FirstAudioPiped],
+                LastAudioMs = timeline[TurnTimeline.Milestones.LastAudioPiped],
+                LlmMs = result.TotalMs,
+                Gaps = ComputeGaps(chunks),
+                ChunkMs = chunks.Select(c => c.Ms).ToList()
+            };
+        }
+        finally
+        {
+            speech.PlaybackStarted -= OnPlaybackStarted;
+        }
     }
 
     private static async Task<RunResult?> RunOnceAsync(

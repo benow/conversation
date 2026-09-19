@@ -140,7 +140,7 @@ public sealed class SettingsHost : IAsyncDisposable
         stt = new { provider = _config.SttProvider, model = _config.SttModel, language = _config.SttLanguage },
         chat = new { provider = _config.AiProvider, model = _config.LlmModel, extractor = _config.ExtractorModel, useTools = _config.UseTools, systemPrompt = _config.LlmSystemPrompt },
         tts = new { provider = _config.TtsProvider, model = _config.TtsModel, voice = _config.TtsVoice },
-        audio = new { inputDevice = _config.InputDevice, outputDevice = _config.OutputDevice, volume = _config.PlaybackVolume },
+        audio = new { inputDevice = _config.InputDevice, outputDevice = _config.OutputDevice, volume = _config.PlaybackVolume, speechRate = _config.SpeechRate <= 0 ? 1.0 : _config.SpeechRate },
         voicesDirectory = _config.VoicesDirectory,
         activePersona = _personas.ActiveName
     };
@@ -170,6 +170,7 @@ public sealed class SettingsHost : IAsyncDisposable
         if (patch.InputDevice != null) _config.InputDevice = patch.InputDevice;
         if (patch.OutputDevice != null) _config.OutputDevice = patch.OutputDevice;
         if (patch.PlaybackVolume.HasValue) _config.PlaybackVolume = patch.PlaybackVolume.Value;
+        if (patch.SpeechRate.HasValue) _config.SpeechRate = Math.Clamp(patch.SpeechRate.Value, 0.5, 2.0);
 
         _configStore.Save(_config);
         _logger.LogInformation("[settings] config saved");
@@ -257,6 +258,7 @@ public sealed class SettingsHost : IAsyncDisposable
         public string? InputDevice { get; set; }
         public string? OutputDevice { get; set; }
         public int? PlaybackVolume { get; set; }
+        public double? SpeechRate { get; set; }
     }
 
     private sealed class PersonaRequest

@@ -44,6 +44,8 @@ public sealed class ConversationConfig : ILegacyProviderConfig
 
     // ---- Audio devices (plan §4.7) ----
     /// <summary>Input device id from AudioDeviceEnumerator, or "" for the system default.</summary>
+    /// <summary>Speech playback rate: 1.0 = normal, 1.2 = 20% faster (pitch preserved).</summary>
+    public double SpeechRate { get; set; } = 1.0;
     public string InputDevice { get; set; } = "";
     public string OutputDevice { get; set; } = "";
     public int PlaybackVolume { get; set; } = 100;

@@ -54,11 +54,14 @@ public sealed class TtsChunkPacer
         return emitted;
     }
 
-    /// <summary>The next chunk's fire threshold: the previous chunk's size grown by the factor,
-    /// clamped to [FirstMinChars, MaxChars].</summary>
+    /// <summary>The next chunk's fire threshold: the previous chunk's size grown by the
+    /// SPEED-ADJUSTED factor, clamped to [FirstMinChars, MaxChars]. Faster speech shortens each
+    /// chunk's playback without shortening its synthesis, so the no-gap growth limit tightens:
+    /// effective = GrowthFactor / PlaybackSpeed.</summary>
     private int NextThreshold()
     {
-        var next = (int)(_lastEmittedChars * _options.GrowthFactor);
+        var effective = _options.GrowthFactor / Math.Max(1.0, _options.PlaybackSpeed);
+        var next = (int)(_lastEmittedChars * effective);
         return Math.Clamp(next, _options.FirstMinChars, _options.MaxChars);
     }
 
@@ -90,6 +93,10 @@ public sealed record TtsChunkPacerOptions
     /// and 43 × 1.5 ≈ 65. Higher values trade smoothness for fewer provider calls.
     /// </summary>
     public double GrowthFactor { get; init; } = 1.4;
+    /// <summary>Speech playback rate (1.0 = normal, 1.2 = 20% faster). Faster speech shortens
+    /// each chunk's playback but NOT its synthesis, so the pacer tightens its growth by this
+    /// factor to keep the no-gap property at any slider position.</summary>
+    public double PlaybackSpeed { get; init; } = 1.0;
     /// <summary>Steady-state cap. 480→300 (2026-08-31, now the growth cap): huge chunks held
     /// the next chunk's audio back ~18s.</summary>
     public int MaxChars { get; init; } = 320;

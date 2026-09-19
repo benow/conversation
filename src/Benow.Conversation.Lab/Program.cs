@@ -98,6 +98,7 @@ var pipeline = new PcmPlaybackPipeline(loggerFactory.CreateLogger<PcmPlaybackPip
     SampleRate = 24000,
     Volume = config.PlaybackVolume,
     Device = string.IsNullOrWhiteSpace(config.OutputDevice) ? null : config.OutputDevice,
+    Rate = Arg("--rate") is { } rateArg && double.TryParse(rateArg, System.Globalization.CultureInfo.InvariantCulture, out var rateVal) ? rateVal : (config.SpeechRate > 0 ? config.SpeechRate : 1.0),
     FreshStartWarmupMs = Arg("--warmup") is { } warmArg && int.TryParse(warmArg, out var warmMs) ? warmMs : 500
 });
 var speech = new SpeechQueue(tts, new PcmPlaybackAudioOut(pipeline), loggerFactory.CreateLogger<SpeechQueue>());
@@ -239,6 +240,7 @@ if (Arg("--bench") is { } benchPath)
     return await Bench.RunAsync(new BenchOptions
     {
         InputWav = benchPath,
+        Text = Arg("--bench-text"),
         Repeats = Arg("--repeat") is { } r && int.TryParse(r, out var rc) ? rc : 2,
         Label = Arg("--label"),
         JsonOut = Arg("--out"),

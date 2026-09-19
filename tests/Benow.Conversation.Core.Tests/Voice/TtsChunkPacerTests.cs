@@ -179,4 +179,28 @@ public class TtsChunkPacerTests
         while (sb.Length < chars - 1) sb.Append(words[sb.Length % words.Length]).Append(' ');
         return sb.ToString().TrimEnd().PadRight(chars - 1).Substring(0, chars - 1) + ".";
     }
+
+    [Fact]
+    public void PlaybackSpeed_TightensGrowth_FasterSpeechSmallerChunks()
+    {
+        // At rate 1.2 the speech plays 1.2× shorter, so chunk N+1's synthesis must fit in
+        // LESS playback cover — the pacer compensates by tightening its growth (1.4 / 1.2).
+        string[] Feed(PacerFactory f)
+        {
+            var pacer = f();
+            var chunks = new List<string>();
+            chunks.AddRange(pacer.AddRange(new[] { S("First sentence that is long enough to cross the floor easily.") }));
+            for (var i = 0; i < 6; i++)
+                chunks.AddRange(pacer.AddRange(new[] { S(Sentence(60)) }));
+            return chunks.ToArray();
+        }
+        var normal = Feed(() => new TtsChunkPacer(new TtsChunkPacerOptions { PlaybackSpeed = 1.0 }));
+        var faster = Feed(() => new TtsChunkPacer(new TtsChunkPacerOptions { PlaybackSpeed = 1.2 }));
+        // Same stream, tighter thresholds → the fast-rate pacer never emits bigger chunks.
+        for (var i = 1; i < Math.Min(normal.Length, faster.Length); i++)
+            Assert.True(faster[i].Length <= normal[i].Length,
+                $"speed 1.2 chunk {i} ({faster[i].Length}c) grew past speed 1.0 ({normal[i].Length}c)");
+    }
+
+    private delegate TtsChunkPacer PacerFactory();
 }
