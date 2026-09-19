@@ -155,6 +155,7 @@ internal static class Program
           --port <n>        settings page port (default 8791)
           --settings        print the settings URL and exit
           --show            open the Converse overlay at startup (no tray needed)
+          --screenshot <p>  render the overlay to a PNG and exit (Wayland-safe self-capture)
           --no-ui           run services without a UI (headless / ssh)
           --verbose         debug logging
           --help            this text

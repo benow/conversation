@@ -9,6 +9,11 @@ using Avalonia.Threading;
 using Benow.Conversation.Settings;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace Benow.Conversation.Desktop;
 
@@ -66,6 +71,19 @@ public sealed class App : Application
             // A tray-less desktop (GNOME without the AppIndicator extension) has no way to open
             // the overlay, so honour an explicit request to show it.
             if (Environment.GetCommandLineArgs().Contains("--show")) ShowOverlay();
+
+            // Debug self-capture: --screenshot <path> renders the live overlay to a PNG and exits.
+            // This is how the UI is verified on Wayland, where the compositor blocks every
+            // external screenshot path (Shell API denied, portal wants a consent click, XWayland's
+            // root is never composited). RenderTargetBitmap needs no such permission.
+            var shotIdx = Environment.GetCommandLineArgs().ToList().IndexOf("--screenshot");
+            if (shotIdx >= 0)
+            {
+                var shotPath = shotIdx + 1 < Environment.GetCommandLineArgs().Length
+                    ? Environment.GetCommandLineArgs()[shotIdx + 1]
+                    : "conversation-overlay.png";
+                CaptureOverlayWhenShown(shotPath);
+            }
 
             // First-run guidance: with no keys the app cannot do anything useful, so say so where
             // the user will see it (tray tooltip) rather than only in the log.
@@ -174,6 +192,47 @@ public sealed class App : Application
         catch (Exception ex)
         {
             Log.LogWarning(ex, "[app] could not open a browser — open {Url} manually", url);
+        }
+    }
+
+    /// <summary>
+    /// Renders the overlay to a PNG once it is on screen, then exits. Uses RenderTargetBitmap —
+    /// an in-process render of the real visual tree — because on Wayland no external tool can
+    /// capture a window's pixels without interactive user consent.
+    /// </summary>
+    private static async void CaptureOverlayWhenShown(string path)
+    {
+        try
+        {
+            ShowOverlay();
+            // Let the first real frames render and the data bindings settle before capturing.
+            await Task.Delay(700);
+
+            var result = await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                if (_overlay is not { } window) return "overlay never opened";
+                var scale = window.RenderScaling;
+                var pixel = new PixelSize(
+                    Math.Max(1, (int)Math.Ceiling(window.Width * scale)),
+                    Math.Max(1, (int)Math.Ceiling(window.Height * scale)));
+                using var rtb = new RenderTargetBitmap(pixel, new Vector(96, 96) * scale);
+                rtb.Render(window);
+                using var fs = File.Create(path);
+                rtb.Save(fs);
+                return null;
+            });
+
+            Console.WriteLine(result ?? $"[screenshot] wrote {path}");
+            Log.LogInformation("[app] screenshot {Result}", result ?? $"written to {path}");
+        }
+        catch (Exception ex)
+        {
+            Log.LogError(ex, "[app] --screenshot failed: {Error}", ex.Message);
+            Console.Error.WriteLine($"[screenshot] failed: {ex.Message}");
+        }
+        finally
+        {
+            (Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown();
         }
     }
 }
