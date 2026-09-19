@@ -78,6 +78,58 @@ public class SpeechQueueTests
     }
 
     [Fact]
+    public async Task ItemDropped_FiresForEachFailedSynthesis_AndDrainedStillFires()
+    {
+        var dropped = new List<string>();
+        var drained = new List<DateTime>();
+        await using var queue = new SpeechQueue(new FailingTts(), new NullAudioOut(), NullLogger<SpeechQueue>.Instance);
+        queue.ItemDropped += t => { lock (dropped) dropped.Add(t); };
+        queue.Drained += () => { lock (drained) drained.Add(DateTime.UtcNow); };
+        await queue.StartAsync(CancellationToken.None);
+
+        queue.Enqueue("a.", cancelCurrent: false);
+        queue.Enqueue("b.", cancelCurrent: false);
+
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (dropped) if (dropped.Count >= 2) break;
+            await Task.Delay(50);
+        }
+        lock (dropped) Assert.Equal(new[] { "a.", "b." }, dropped);
+        lock (drained) Assert.Single(drained);
+        await queue.StopAsync();
+    }
+
+    [Fact]
+    public async Task SynthesizedAudio_CarriesTheTrueSampleRate()
+    {
+        var tts = new RateTts(16000);
+        var outSink = new NullAudioOut();
+        await using var queue = new SpeechQueue(tts, outSink, NullLogger<SpeechQueue>.Instance);
+        await queue.StartAsync(CancellationToken.None);
+        queue.Enqueue("rate check.", cancelCurrent: false);
+
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (outSink.Played) if (outSink.Played.Count > 0) break;
+            await Task.Delay(50);
+        }
+        lock (outSink.Played) Assert.Equal(16000, outSink.Played[0].SampleRate);
+        await queue.StopAsync();
+    }
+
+    private sealed class RateTts : ITtsService
+    {
+        private readonly int _rate;
+        public RateTts(int rate) => _rate = rate;
+        public bool IsConfigured => true;
+        public Task<TtsAudio?> SynthesizeAsync(string text, CancellationToken ct) =>
+            Task.FromResult<TtsAudio?>(new TtsAudio(new byte[3200], _rate));
+    }
+
+    [Fact]
     public async Task Drained_FiresAfterTheLastChunkPlays_ExactlyOnce()
     {
         var outSink = new NullAudioOut();

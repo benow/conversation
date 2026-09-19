@@ -46,7 +46,7 @@ public sealed class SpeechQueue : IAsyncDisposable
     private int _queued;
 
     /// <summary>A synthesized chunk waiting for its turn to play. Public: the sink receives it.</summary>
-    public sealed record SynthesizedAudio(string Text, byte[] Pcm, long AudioMs, long SynthMs, string? FallbackMessage = null);
+    public sealed record SynthesizedAudio(string Text, byte[] Pcm, long AudioMs, long SynthMs, string? FallbackMessage = null, int SampleRate = 24000);
 
     /// <summary>Raised per completed item: (text, audioMs) — drives per-turn metrics.</summary>
     public event Action<string, long>? Spoken;
@@ -65,6 +65,9 @@ public sealed class SpeechQueue : IAsyncDisposable
     /// <summary>Raised once after the queue empties and the last chunk finishes playing (turn's
     /// audio is fully delivered). Always fires — hosts use it to release client audio sessions.</summary>
     public event Action? Drained;
+    /// <summary>Raised when a queued chunk's synthesis returned no audio (provider timeout/failure).
+    /// Silence where the user expected words — hosts should count and surface it.</summary>
+    public event Action<string>? ItemDropped;
 
     public SpeechQueue(ITtsService tts, IAudioOut audioOut, ILogger<SpeechQueue> logger)
     {
@@ -167,6 +170,7 @@ public sealed class SpeechQueue : IAsyncDisposable
                 if (audio == null)
                 {
                     _logger.LogWarning("[speech] synthesis returned no audio for {Chars}c — skipping", text.Length);
+                    ItemDropped?.Invoke(text);
                     continue;
                 }
 
@@ -177,7 +181,7 @@ public sealed class SpeechQueue : IAsyncDisposable
 
                 // Bounded: at most LookAheadChunks wait here, so a cancelled turn cannot leave a
                 // long tail of stale synthesized audio behind (FlushAndCancel empties this).
-                await _ready.Writer.WriteAsync(new SynthesizedAudio(text, audio.Pcm, audio.AudioMs, sw.ElapsedMilliseconds, audio.FallbackMessage), itemCts.Token);
+                await _ready.Writer.WriteAsync(new SynthesizedAudio(text, audio.Pcm, audio.AudioMs, sw.ElapsedMilliseconds, audio.FallbackMessage, audio.SampleRate), itemCts.Token);
             }
             catch (OperationCanceledException) when (itemCts.IsCancellationRequested && !ct.IsCancellationRequested)
             {
