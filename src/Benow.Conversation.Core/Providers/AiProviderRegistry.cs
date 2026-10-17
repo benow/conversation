@@ -9,6 +9,7 @@ public static class AiProviderRegistry
     public static readonly IAiProvider Groq = new GroqProvider();
     public static readonly IAiProvider Cartesia = new CartesiaProvider();
     public static readonly IAiProvider MiniMax = new MiniMaxProvider();
+    public static readonly IAiProvider Venice = new VeniceProvider();
 
     private static readonly Dictionary<string, IAiProvider> _providers = new()
     {
@@ -17,7 +18,8 @@ public static class AiProviderRegistry
         [Replicate.Id] = Replicate,
         [Groq.Id] = Groq,
         [Cartesia.Id] = Cartesia,
-        [MiniMax.Id] = MiniMax
+        [MiniMax.Id] = MiniMax,
+        [Venice.Id] = Venice
     };
 
     public static IReadOnlyList<IAiProvider> All => _providers.Values.ToList();

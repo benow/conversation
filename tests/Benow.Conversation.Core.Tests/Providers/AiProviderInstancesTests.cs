@@ -85,9 +85,9 @@ public class AiProviderInstancesTests
     }
 
     [Fact]
-    public void Registry_SixProviders_CapabilityFilters()
+    public void Registry_SevenProviders_CapabilityFilters()
     {
-        Assert.Equal(6, AiProviderRegistry.All.Count);
+        Assert.Equal(7, AiProviderRegistry.All.Count);
         Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Stt), p => p.Id == "groq");
         Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Stt), p => p.Id == "cartesia");
         Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Tts), p => p.Id == "replicate");
@@ -95,5 +95,22 @@ public class AiProviderInstancesTests
         Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Tts), p => p.Id == "minimax");
         Assert.DoesNotContain(AiProviderRegistry.ForCapability(AiCapability.Tts), p => p.Id == "groq");
         Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Llm), p => p.Id == "openai-compatible");
+        Assert.Contains(AiProviderRegistry.ForCapability(AiCapability.Llm), p => p.Id == "venice");
+        Assert.DoesNotContain(AiProviderRegistry.ForCapability(AiCapability.Tts), p => p.Id == "venice");
+    }
+
+    [Fact]
+    public void ResolveApiKey_VeniceInstance_UsesApiKeyAndBaseUrl()
+    {
+        var cfg = new TestConfig
+        {
+            AiProviders = """[{"id":"v1234567","name":"Venice","typeId":"venice","params":{"VeniceApiKey":"vv-key"}}]"""
+        };
+
+        var instance = AiProviderInstances.Find(cfg, "v1234567");
+
+        Assert.NotNull(instance);
+        Assert.Equal("vv-key", AiProviderInstances.ResolveApiKey(cfg, instance!));
+        Assert.Equal("https://api.venice.ai/api/v1/", AiProviderInstances.ResolveBaseUrl(cfg, instance!));
     }
 }
