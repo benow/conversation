@@ -138,10 +138,17 @@ public static class AiProviderInstances
         var passwordField = provider.GetConfigFields().FirstOrDefault(f => f.Type == "password");
         if (passwordField != null &&
             instance.Params.TryGetValue(passwordField.Key, out var v) &&
-            !string.IsNullOrWhiteSpace(v))
+            !string.IsNullOrWhiteSpace(v) &&
+            !IsMasked(v))
             return v;
         return LegacyFlatKey(cfg, instance.TypeId);
     }
+
+    /// <summary>A masked presence boolean ("true"/"false") is not an API key. Treat it as
+    /// empty so legacy catalog migration can fall back to the flat provider key.</summary>
+    private static bool IsMasked(string? value) =>
+        string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "false", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Base URL for an instance: the provider's built-in default when it has one, otherwise

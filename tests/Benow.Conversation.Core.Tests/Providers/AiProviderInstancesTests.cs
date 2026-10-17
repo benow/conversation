@@ -100,6 +100,20 @@ public class AiProviderInstancesTests
     }
 
     [Fact]
+    public void ResolveApiKey_MaskedPresence_FallsBackToLegacyKey()
+    {
+        var cfg = new TestConfig
+        {
+            OpenRouterApiKey = "legacy-key",
+            AiProviders = """[{"id":"masked","name":"OpenRouter","typeId":"openrouter","params":{"OpenRouterApiKey":"true"}}]"""
+        };
+
+        var instance = AiProviderInstances.Find(cfg, "masked");
+
+        Assert.Equal("legacy-key", AiProviderInstances.ResolveApiKey(cfg, instance!));
+    }
+
+    [Fact]
     public void ResolveApiKey_VeniceInstance_UsesApiKeyAndBaseUrl()
     {
         var cfg = new TestConfig
