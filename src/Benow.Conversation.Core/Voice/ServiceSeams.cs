@@ -58,8 +58,11 @@ public interface IVoiceLlmService
     /// <paramref name="userId"/>/<paramref name="deviceId"/> travel to the tool executor so
     /// identity-dependent tools (e.g. play_channel → which TV) work.
     /// Chunks are delivered via <paramref name="onChunk"/> as they arrive (for SSE streaming).
+    /// <paramref name="model"/> is an optional per-turn model override (open-claw R3: the
+    /// chat overlay's model picker); null/empty = the consumer's configured default.
     /// Returns null on failure.
     /// </summary>
     Task<string?> ChatAsync(string transcript, IReadOnlyList<ChatTurn>? history, string? timezone,
-        string userId, string deviceId, Action<string>? onChunk, CancellationToken ct);
+        string userId, string deviceId, Action<string>? onChunk, CancellationToken ct,
+        string? model = null);
 }
